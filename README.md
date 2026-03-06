@@ -8,4 +8,3 @@ Currently supported algorithms
 ## Guides
 
 - Usage guide: [hiro_usage.md](hiro_usage.md)
-- Implementation specification: [hiro_guide.md](hiro_guide.md)

@@ -49,6 +49,10 @@ class _MacroTransitionAccumulator:
             Sequence of flattened next states ``s_{t+1}, ..., s_{t+c}``.
     micro_actions : list[np.ndarray]
             Sequence of scaled worker actions in ``[-1, 1]``.
+        micro_projected_obs : list[np.ndarray]
+            Sequence of projected states ``h(s_t), ..., h(s_{t+c-1})``.
+        micro_projected_next_obs : list[np.ndarray]
+            Sequence of projected next states ``h(s_{t+1}), ..., h(s_{t+c})``.
     """
 
     start_obs: Optional[np.ndarray] = None
@@ -57,6 +61,8 @@ class _MacroTransitionAccumulator:
     micro_obs: list[np.ndarray] = None  # type: ignore[assignment]
     micro_next_obs: list[np.ndarray] = None  # type: ignore[assignment]
     micro_actions: list[np.ndarray] = None  # type: ignore[assignment]
+    micro_projected_obs: list[np.ndarray] = None  # type: ignore[assignment]
+    micro_projected_next_obs: list[np.ndarray] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self.reset()
@@ -69,6 +75,8 @@ class _MacroTransitionAccumulator:
         self.micro_obs = []
         self.micro_next_obs = []
         self.micro_actions = []
+        self.micro_projected_obs = []
+        self.micro_projected_next_obs = []
 
 
 class _SpaceOverrideEnv(gym.Env[np.ndarray, np.ndarray]):
@@ -115,8 +123,8 @@ class HIROReplayBuffer(ReplayBuffer):
     ----------
     subgoal_freq : int
             High-level action period ``c``.
-    state_to_goal_proj_fn : callable
-            Projection function ``h(s)`` mapping flattened states to subgoal vectors.
+        state_to_goal_proj_fn : callable
+            Projection function ``h(s)`` used only for API compatibility.
     worker_action_dim : int
             Low-level action dimension (scaled action stored in manager buffer metadata).
     correction_candidate_count : int, default=10
@@ -182,6 +190,15 @@ class HIROReplayBuffer(ReplayBuffer):
             (self.buffer_size, self.n_envs, subgoal_freq, worker_action_dim),
             dtype=np.float32,
         )
+        goal_dim = int(self._subgoal_action_space.shape[0])
+        self.micro_projected_obs = np.zeros(
+            (self.buffer_size, self.n_envs, subgoal_freq, goal_dim),
+            dtype=np.float32,
+        )
+        self.micro_projected_next_obs = np.zeros(
+            (self.buffer_size, self.n_envs, subgoal_freq, goal_dim),
+            dtype=np.float32,
+        )
         self.micro_lengths = np.zeros((self.buffer_size, self.n_envs), dtype=np.int32)
 
         self._low_level_action_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
@@ -230,10 +247,20 @@ class HIROReplayBuffer(ReplayBuffer):
                 Flattened next-state sequence with shape ``(T, obs_dim)``.
         micro_actions : np.ndarray
                 Scaled worker actions with shape ``(T, worker_action_dim)``.
+        micro_projected_observations : np.ndarray
+            Projected state sequence with shape ``(T, goal_dim)``.
+        micro_projected_next_observations : np.ndarray
+            Projected next-state sequence with shape ``(T, goal_dim)``.
         """
         micro_observations = cast(np.ndarray, kwargs["micro_observations"])
         micro_next_observations = cast(np.ndarray, kwargs["micro_next_observations"])
         micro_actions = cast(np.ndarray, kwargs["micro_actions"])
+        micro_projected_observations = cast(
+            np.ndarray, kwargs["micro_projected_observations"]
+        )
+        micro_projected_next_observations = cast(
+            np.ndarray, kwargs["micro_projected_next_observations"]
+        )
 
         length = int(micro_observations.shape[0])
         if length == 0:
@@ -250,6 +277,12 @@ class HIROReplayBuffer(ReplayBuffer):
             np.float32
         )
         self.micro_actions[pos, 0, :length] = micro_actions.astype(np.float32)
+        self.micro_projected_obs[pos, 0, :length] = micro_projected_observations.astype(
+            np.float32
+        )
+        self.micro_projected_next_obs[pos, 0, :length] = (
+            micro_projected_next_observations.astype(np.float32)
+        )
 
         super().add(
             obs=obs,
@@ -331,12 +364,15 @@ class HIROReplayBuffer(ReplayBuffer):
                 continue
 
             states = self.micro_obs[buffer_idx, env_idx, :length]
-            next_states = self.micro_next_obs[buffer_idx, env_idx, :length]
             actions = self.micro_actions[buffer_idx, env_idx, :length]
+            projected_states = self.micro_projected_obs[buffer_idx, env_idx, :length]
+            projected_next_states = self.micro_projected_next_obs[
+                buffer_idx, env_idx, :length
+            ]
 
             old_goal = self._unscale_action(current_actions[sample_i])
-            start_proj = self.state_to_goal_proj_fn(states[0])
-            end_proj = self.state_to_goal_proj_fn(next_states[length - 1])
+            start_proj = projected_states[0]
+            end_proj = projected_next_states[length - 1]
             delta_goal = end_proj - start_proj
 
             candidates = [old_goal.astype(np.float32), delta_goal.astype(np.float32)]
@@ -373,10 +409,8 @@ class HIROReplayBuffer(ReplayBuffer):
                     diff = actions[step_idx] - predicted_action
                     score += float(-0.5 * np.sum((diff / sigma) ** 2))
 
-                    projected_state = self.state_to_goal_proj_fn(states[step_idx])
-                    projected_next_state = self.state_to_goal_proj_fn(
-                        next_states[step_idx]
-                    )
+                    projected_state = projected_states[step_idx]
+                    projected_next_state = projected_next_states[step_idx]
                     current_goal = projected_state + current_goal - projected_next_state
 
                 if score > best_score:
@@ -479,7 +513,9 @@ class HIRO(BaseAlgorithm):
         gradient_steps: int = 1,
         subgoal_freq: int = 10,
         subgoal_space: Optional[spaces.Box] = None,
-        state_to_goal_proj_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        state_to_goal_proj_fn: Optional[
+            Callable[[Union[np.ndarray, dict[str, np.ndarray]]], np.ndarray]
+        ] = None,
         manager_exploration_noise: float = 0.1,
         worker_exploration_noise: float = 0.1,
         correction_candidate_count: int = 10,
@@ -493,8 +529,20 @@ class HIRO(BaseAlgorithm):
         device: Union[th.device, str] = "auto",
         seed: Optional[int] = None,
     ) -> None:
+        base_policy: Union[str, type] = policy
+        if (
+            isinstance(policy, str)
+            and policy in {"MlpPolicy", "CnnPolicy"}
+            and not isinstance(env, str)
+            and isinstance(env.observation_space, spaces.Dict)
+        ):
+            # BaseAlgorithm validates policy/obs-space consistency for direct policy creation.
+            # HIRO creates internal TD3 models with flattened observations, so this guard
+            # should not block dict-observation environments.
+            base_policy = "MultiInputPolicy"
+
         super().__init__(
-            policy=policy,
+            policy=base_policy,
             env=env,
             learning_rate=learning_rate,
             policy_kwargs=None,
@@ -531,7 +579,10 @@ class HIRO(BaseAlgorithm):
         self._worker_kwargs = worker_kwargs or {}
         self._td3_policy = policy
 
-        self._projection = SubgoalProjectionWrapper(state_to_goal_proj_fn)
+        self._projection = SubgoalProjectionWrapper(
+            state_to_goal_proj_fn,
+            observation_space=self.observation_space,
+        )
         self._flat_obs_space = space_utils.flatten_space(self.observation_space)
         if not isinstance(self._flat_obs_space, spaces.Box):
             raise TypeError(
@@ -631,14 +682,25 @@ class HIRO(BaseAlgorithm):
         # Expose manager policy for BaseAlgorithm.predict compatibility.
         self.policy = self.manager.policy
 
-    def _project_state(self, flat_state: np.ndarray) -> np.ndarray:
-        """Project flattened state into subgoal coordinates."""
-        projected = self._projection(flat_state)
+    def _project_state(
+        self, observation: Union[np.ndarray, dict[str, np.ndarray]]
+    ) -> np.ndarray:
+        """Project observation into subgoal coordinates."""
+        projected = self._projection(observation)
         if projected.shape != self.subgoal_space.shape:
             raise ValueError(
                 f"Projected goal shape {projected.shape} does not match subgoal space {self.subgoal_space.shape}."
             )
         return projected
+
+    def _extract_single_env_observation(
+        self,
+        vec_obs: Union[np.ndarray, dict[str, np.ndarray]],
+    ) -> Union[np.ndarray, dict[str, np.ndarray]]:
+        """Extract one-environment observation from VecEnv output."""
+        if isinstance(vec_obs, dict):
+            return {key: value[0] for key, value in vec_obs.items()}
+        return vec_obs[0]
 
     def _predict_worker_scaled_action(
         self, worker_observation: np.ndarray
@@ -690,13 +752,17 @@ class HIRO(BaseAlgorithm):
         ).astype(np.float32)
 
     def _extract_transition_next_obs(
-        self, vec_next_obs: np.ndarray, done: bool, info: dict[str, Any]
-    ) -> np.ndarray:
+        self,
+        vec_next_obs: Union[np.ndarray, dict[str, np.ndarray]],
+        done: bool,
+        info: dict[str, Any],
+    ) -> Union[np.ndarray, dict[str, np.ndarray]]:
         """Get true next observation, handling VecEnv terminal observation semantics."""
         if done and info.get("terminal_observation") is not None:
-            terminal_obs = info["terminal_observation"]
-            return flatten_observation(self.observation_space, terminal_obs)
-        return flatten_observation(self.observation_space, vec_next_obs)
+            return cast(
+                Union[np.ndarray, dict[str, np.ndarray]], info["terminal_observation"]
+            )
+        return self._extract_single_env_observation(vec_next_obs)
 
     def _finalize_macro_transition(
         self, next_flat_obs: np.ndarray, done: bool, info: dict[str, Any]
@@ -718,6 +784,12 @@ class HIRO(BaseAlgorithm):
         micro_obs = np.asarray(self._macro.micro_obs, dtype=np.float32)
         micro_next_obs = np.asarray(self._macro.micro_next_obs, dtype=np.float32)
         micro_actions = np.asarray(self._macro.micro_actions, dtype=np.float32)
+        micro_projected_obs = np.asarray(
+            self._macro.micro_projected_obs, dtype=np.float32
+        )
+        micro_projected_next_obs = np.asarray(
+            self._macro.micro_projected_next_obs, dtype=np.float32
+        )
 
         assert isinstance(self.manager.replay_buffer, HIROReplayBuffer)
         self.manager.replay_buffer.add(
@@ -730,6 +802,8 @@ class HIRO(BaseAlgorithm):
             micro_observations=micro_obs,
             micro_next_observations=micro_next_obs,
             micro_actions=micro_actions,
+            micro_projected_observations=micro_projected_obs,
+            micro_projected_next_observations=micro_projected_next_obs,
         )
 
         self._macro.reset()
@@ -744,9 +818,10 @@ class HIRO(BaseAlgorithm):
         batch_size : int
                 Batch size for replay sampling.
         """
-        self.manager.replay_buffer.set_low_level_action_fn(
-            self._predict_worker_scaled_action
-        )  # type: ignore[union-attr]
+        if isinstance(self.manager.replay_buffer, HIROReplayBuffer):
+            self.manager.replay_buffer.set_low_level_action_fn(
+                self._predict_worker_scaled_action
+            )
 
         worker_buffer_size = (
             self.worker.replay_buffer.size()
@@ -859,8 +934,9 @@ class HIRO(BaseAlgorithm):
         assert self.worker.replay_buffer is not None
 
         while self.num_timesteps < total_timesteps:
-            vec_obs = cast(np.ndarray, self._last_obs)
-            flat_obs = flatten_observation(self.observation_space, vec_obs[0])
+            vec_obs = cast(Union[np.ndarray, dict[str, np.ndarray]], self._last_obs)
+            obs = self._extract_single_env_observation(vec_obs)
+            flat_obs = flatten_observation(self.observation_space, obs)
 
             if self._active_goal is None:
                 self._active_goal = self._sample_manager_goal(
@@ -874,14 +950,15 @@ class HIRO(BaseAlgorithm):
             env_action = self._sample_worker_action(worker_obs, deterministic=False)
 
             new_obs, rewards, dones, infos = self.env.step(env_action[None, :])
-            new_obs = cast(np.ndarray, new_obs)
+            new_obs = cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
             reward = float(rewards[0])
             done = bool(dones[0])
             info = infos[0]
 
-            next_flat_obs = self._extract_transition_next_obs(new_obs[0], done, info)
-            projected_obs = self._project_state(flat_obs)
-            projected_next_obs = self._project_state(next_flat_obs)
+            next_obs = self._extract_transition_next_obs(new_obs, done, info)
+            next_flat_obs = flatten_observation(self.observation_space, next_obs)
+            projected_obs = self._project_state(obs)
+            projected_next_obs = self._project_state(next_obs)
 
             transitioned_goal = projected_obs + self._active_goal - projected_next_obs
             intrinsic_reward = -float(np.linalg.norm(transitioned_goal, ord=2))
@@ -903,10 +980,12 @@ class HIRO(BaseAlgorithm):
             self._macro.micro_obs.append(flat_obs.copy())
             self._macro.micro_next_obs.append(next_flat_obs.copy())
             self._macro.micro_actions.append(scaled_worker_action.copy())
+            self._macro.micro_projected_obs.append(projected_obs.copy())
+            self._macro.micro_projected_next_obs.append(projected_next_obs.copy())
 
             self.num_timesteps += 1
             self._update_info_buffer(infos, dones)
-            self._last_obs = cast(np.ndarray, new_obs)
+            self._last_obs = new_obs
 
             callback.update_locals(locals())
             if not callback.on_step():

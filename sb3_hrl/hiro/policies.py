@@ -6,7 +6,7 @@ HIRO algorithm implementation.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
 from gymnasium import spaces
@@ -29,35 +29,49 @@ class SubgoalProjectionWrapper:
     """
 
     def __init__(
-        self, projection_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
+        self,
+        projection_fn: Optional[
+            Callable[[Union[np.ndarray, dict[str, np.ndarray]]], np.ndarray]
+        ] = None,
+        observation_space: Optional[spaces.Space] = None,
     ) -> None:
         self._projection_fn = projection_fn
+        self._observation_space = observation_space
 
-    def __call__(self, state: np.ndarray) -> np.ndarray:
-        """Project a flattened state into subgoal space.
+    def __call__(
+        self, observation: Union[np.ndarray, dict[str, np.ndarray]]
+    ) -> np.ndarray:
+        """Project an observation into subgoal space.
 
         Parameters
         ----------
-        state : np.ndarray
-                Flattened state representation.
+        observation : np.ndarray | dict[str, np.ndarray]
+                Environment observation in its original format.
 
         Returns
         -------
         np.ndarray
                 Projected subgoal vector with ``dtype=float32``.
         """
-        state = np.asarray(state, dtype=np.float32)
         if self._projection_fn is None:
-            return state.astype(np.float32, copy=False)
+            if self._observation_space is not None:
+                flat = space_utils.flatten(self._observation_space, observation)
+                return np.asarray(flat, dtype=np.float32)
+            if isinstance(observation, dict):
+                raise ValueError(
+                    "Identity projection for dict observations requires observation_space."
+                )
+            return np.asarray(observation, dtype=np.float32).reshape(-1)
 
-        projected = np.asarray(self._projection_fn(state), dtype=np.float32)
+        projected = np.asarray(self._projection_fn(observation), dtype=np.float32)
         if projected.ndim != 1:
             raise ValueError("Projection function must return a 1D subgoal vector.")
         return projected
 
 
 def flatten_observation(
-    observation_space: spaces.Space, observation: np.ndarray
+    observation_space: spaces.Space,
+    observation: Union[np.ndarray, dict[str, np.ndarray]],
 ) -> np.ndarray:
     """Flatten an observation according to a Gymnasium space.
 
@@ -65,7 +79,7 @@ def flatten_observation(
     ----------
     observation_space : spaces.Space
             Original environment observation space.
-    observation : np.ndarray
+        observation : np.ndarray | dict[str, np.ndarray]
             Observation to flatten.
 
     Returns
