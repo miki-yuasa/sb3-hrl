@@ -4,3 +4,8 @@ Hierarchical reinforcement learning algorithms implemented by leveraging Stable 
 
 Currently supported algorithms
 - HIRO
+
+## Guides
+
+- Usage guide: [hiro_usage.md](hiro_usage.md)
+- Implementation specification: [hiro_guide.md](hiro_guide.md)
