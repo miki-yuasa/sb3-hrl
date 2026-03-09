@@ -108,10 +108,14 @@ class _SpaceOverrideEnv(gym.Env[np.ndarray, np.ndarray]):
     def reset(
         self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None
     ):
-        raise NotImplementedError("_SpaceOverrideEnv is a stub and should not be stepped.")
+        raise NotImplementedError(
+            "_SpaceOverrideEnv is a stub and should not be stepped."
+        )
 
     def step(self, action: np.ndarray):
-        raise NotImplementedError("_SpaceOverrideEnv is a stub and should not be stepped.")
+        raise NotImplementedError(
+            "_SpaceOverrideEnv is a stub and should not be stepped."
+        )
 
 
 class HIROReplayBuffer(ReplayBuffer):
@@ -542,17 +546,17 @@ class HIRO(BaseAlgorithm):
         device: Union[th.device, str] = "auto",
         seed: Optional[int] = None,
     ) -> None:
-        base_policy: Union[str, type] = policy
+        # BaseAlgorithm validates policy/obs-space consistency.  For Dict
+        # observation spaces we must satisfy that check with MultiInputPolicy,
+        # even though HIRO always flattens observations internally.
         if (
             isinstance(policy, str)
-            and policy in {"MlpPolicy", "CnnPolicy"}
             and not isinstance(env, str)
             and isinstance(env.observation_space, spaces.Dict)
         ):
-            # BaseAlgorithm validates policy/obs-space consistency for direct policy creation.
-            # HIRO creates internal TD3 models with flattened observations, so this guard
-            # should not block dict-observation environments.
-            base_policy = "MultiInputPolicy"
+            base_policy: Union[str, type] = "MultiInputPolicy"
+        else:
+            base_policy = policy
 
         super().__init__(
             policy=base_policy,
@@ -599,7 +603,9 @@ class HIRO(BaseAlgorithm):
 
         self._manager_kwargs = manager_kwargs or {}
         self._worker_kwargs = worker_kwargs or {}
-        self._td3_policy = policy
+        # Internal TD3/DQN always operate on flattened Box observations,
+        # so they must use MlpPolicy regardless of the user-facing policy.
+        self._td3_policy: Union[str, type] = "MlpPolicy"
 
         self._projection = SubgoalProjectionWrapper(
             state_to_goal_proj_fn,
