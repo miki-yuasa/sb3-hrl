@@ -80,40 +80,38 @@ class _MacroTransitionAccumulator:
 
 
 class _SpaceOverrideEnv(gym.Env[np.ndarray, np.ndarray]):
-    """Minimal environment proxy with overridden spaces.
+    """Stub environment exposing custom observation/action spaces.
+
+    Used solely to satisfy the internal TD3/DQN constructor requirements.
+    ``step`` and ``reset`` are never called — HIRO manages all rollout
+    collection itself.
 
     Parameters
     ----------
-    base_env : gym.Env
-            Backing environment used for ``step`` and ``reset`` calls.
     observation_space : spaces.Space
-            Observation space exposed by the proxy.
-    action_space : spaces.Box
-            Action space exposed by the proxy.
+            Observation space exposed by the stub.
+    action_space : spaces.Space
+            Action space exposed by the stub.
     """
 
     metadata = {"render_modes": []}
 
     def __init__(
         self,
-        base_env: gym.Env[Any, Any],
         observation_space: spaces.Space,
         action_space: spaces.Space,
     ) -> None:
         super().__init__()
-        self.base_env = base_env
         self.observation_space = observation_space
         self.action_space = action_space
 
     def reset(
         self, *, seed: Optional[int] = None, options: Optional[dict[str, Any]] = None
     ):
-        """Delegate reset to the base environment."""
-        return self.base_env.reset(seed=seed, options=options)
+        raise NotImplementedError("_SpaceOverrideEnv is a stub and should not be stepped.")
 
     def step(self, action: np.ndarray):
-        """Delegate step to the base environment."""
-        return self.base_env.step(action)
+        raise NotImplementedError("_SpaceOverrideEnv is a stub and should not be stepped.")
 
 
 class HIROReplayBuffer(ReplayBuffer):
@@ -656,12 +654,7 @@ class HIRO(BaseAlgorithm):
         if not isinstance(self.env, VecEnv):
             raise TypeError("HIRO expects a vectorized environment internally.")
 
-        vec_env_any = cast(Any, self.env)
-        if not hasattr(vec_env_any, "envs"):
-            raise TypeError("HIRO expects a DummyVecEnv-like vectorized environment.")
-        raw_env = vec_env_any.envs[0]
         manager_env = _SpaceOverrideEnv(
-            base_env=raw_env,
             observation_space=self._flat_obs_space,
             action_space=self.subgoal_space,
         )
@@ -671,7 +664,6 @@ class HIRO(BaseAlgorithm):
             else self._env_action_space
         )
         worker_env = _SpaceOverrideEnv(
-            base_env=raw_env,
             observation_space=self.worker_observation_space,
             action_space=worker_action_space,
         )
