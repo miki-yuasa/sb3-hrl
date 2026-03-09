@@ -12,7 +12,7 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 from gymnasium.spaces import utils as space_utils
-from stable_baselines3 import TD3
+from stable_baselines3 import DQN, TD3
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.type_aliases import (
@@ -98,7 +98,7 @@ class _SpaceOverrideEnv(gym.Env[np.ndarray, np.ndarray]):
         self,
         base_env: gym.Env[Any, Any],
         observation_space: spaces.Space,
-        action_space: spaces.Box,
+        action_space: spaces.Space,
     ) -> None:
         super().__init__()
         self.base_env = base_env
@@ -139,6 +139,7 @@ class HIROReplayBuffer(ReplayBuffer):
     SB3 TD3 uses deterministic actors. To compute HIRO's correction score
     ``sum log pi(a|s,g)``, this buffer models the low-level policy as an
     isotropic Gaussian centered at the current deterministic action mean.
+    For discrete workers, scoring uses log-softmax of Q-values.
     """
 
     def __init__(
@@ -154,6 +155,7 @@ class HIROReplayBuffer(ReplayBuffer):
         subgoal_freq: int,
         state_to_goal_proj_fn: Callable[[np.ndarray], np.ndarray],
         worker_action_dim: int,
+        discrete_worker: bool = False,
         correction_candidate_count: int = 10,
         correction_noise_scale: float = 0.5,
         correction_action_sigma: float = 0.2,
@@ -174,6 +176,7 @@ class HIROReplayBuffer(ReplayBuffer):
         self.subgoal_freq = subgoal_freq
         self.state_to_goal_proj_fn = state_to_goal_proj_fn
         self.worker_action_dim = worker_action_dim
+        self._discrete_worker = discrete_worker
         self.correction_candidate_count = correction_candidate_count
         self.correction_noise_scale = correction_noise_scale
         self.correction_action_sigma = correction_action_sigma
@@ -405,9 +408,21 @@ class HIROReplayBuffer(ReplayBuffer):
                     worker_obs = np.concatenate(
                         [states[step_idx], current_goal], axis=0
                     ).astype(np.float32, copy=False)
-                    predicted_action = self._low_level_action_fn(worker_obs[None, :])[0]
-                    diff = actions[step_idx] - predicted_action
-                    score += float(-0.5 * np.sum((diff / sigma) ** 2))
+
+                    if self._discrete_worker:
+                        q_values = self._low_level_action_fn(worker_obs[None, :])[0]
+                        max_q = np.max(q_values)
+                        log_probs = (
+                            q_values - max_q - np.log(np.sum(np.exp(q_values - max_q)))
+                        )
+                        action_idx = int(actions[step_idx, 0])
+                        score += float(log_probs[action_idx])
+                    else:
+                        predicted_action = self._low_level_action_fn(
+                            worker_obs[None, :]
+                        )[0]
+                        diff = actions[step_idx] - predicted_action
+                        score += float(-0.5 * np.sum((diff / sigma) ** 2))
 
                     projected_state = projected_states[step_idx]
                     projected_next_state = projected_next_states[step_idx]
@@ -555,14 +570,23 @@ class HIRO(BaseAlgorithm):
             seed=seed,
             use_sde=False,
             sde_sample_freq=-1,
-            supported_action_spaces=(spaces.Box,),
+            supported_action_spaces=(spaces.Box, spaces.Discrete, spaces.MultiDiscrete),
         )
 
-        if not isinstance(self.action_space, spaces.Box):
-            raise TypeError(
-                "HIRO requires a continuous (Box) environment action space."
-            )
+        self._discrete_worker = isinstance(
+            self.action_space, (spaces.Discrete, spaces.MultiDiscrete)
+        )
         self._env_action_space = self.action_space
+        self._multi_discrete_nvec: Optional[np.ndarray] = None
+        if isinstance(self.action_space, spaces.MultiDiscrete):
+            self._multi_discrete_nvec = self.action_space.nvec.copy()
+            self._worker_discrete_space = spaces.Discrete(
+                int(np.prod(self._multi_discrete_nvec))
+            )
+        elif isinstance(self.action_space, spaces.Discrete):
+            self._worker_discrete_space = self.action_space
+        else:
+            self._worker_discrete_space = None
 
         self.buffer_size = buffer_size
         self.learning_starts = learning_starts
@@ -605,12 +629,19 @@ class HIRO(BaseAlgorithm):
             self.observation_space, self.subgoal_space
         )
 
+        if self._discrete_worker:
+            self._worker_action_dim = 1
+        else:
+            self._worker_action_dim = int(
+                cast(spaces.Box, self._env_action_space).shape[0]
+            )
+
         self.correction_candidate_count = correction_candidate_count
         self.correction_noise_scale = correction_noise_scale
         self.correction_action_sigma = correction_action_sigma
 
         self.manager: TD3
-        self.worker: TD3
+        self.worker: Union[TD3, DQN]
 
         self._active_goal: Optional[np.ndarray] = None
         self._goal_step = 0
@@ -634,10 +665,15 @@ class HIRO(BaseAlgorithm):
             observation_space=self._flat_obs_space,
             action_space=self.subgoal_space,
         )
+        worker_action_space: spaces.Space = (
+            cast(spaces.Space, self._worker_discrete_space)
+            if self._discrete_worker
+            else self._env_action_space
+        )
         worker_env = _SpaceOverrideEnv(
             base_env=raw_env,
             observation_space=self.worker_observation_space,
-            action_space=self._env_action_space,
+            action_space=worker_action_space,
         )
 
         shared_td3_kwargs: dict[str, Any] = {
@@ -659,7 +695,8 @@ class HIRO(BaseAlgorithm):
         manager_td3_kwargs["replay_buffer_kwargs"] = {
             "subgoal_freq": self.subgoal_freq,
             "state_to_goal_proj_fn": self._project_state,
-            "worker_action_dim": int(self._env_action_space.shape[0]),
+            "worker_action_dim": self._worker_action_dim,
+            "discrete_worker": self._discrete_worker,
             "correction_candidate_count": self.correction_candidate_count,
             "correction_noise_scale": self.correction_noise_scale,
             "correction_action_sigma": self.correction_action_sigma,
@@ -670,13 +707,34 @@ class HIRO(BaseAlgorithm):
         self.manager = TD3(
             self._td3_policy, manager_env, _init_setup_model=True, **manager_td3_kwargs
         )
-        self.worker = TD3(
-            self._td3_policy, worker_env, _init_setup_model=True, **worker_td3_kwargs
-        )
+        if self._discrete_worker:
+            worker_dqn_kwargs = (
+                shared_td3_kwargs
+                | {
+                    "exploration_initial_eps": 0.0,
+                    "exploration_final_eps": 0.0,
+                }
+                | self._worker_kwargs
+            )
+            self.worker = DQN(
+                self._td3_policy,
+                worker_env,
+                _init_setup_model=True,
+                **worker_dqn_kwargs,
+            )
+        else:
+            self.worker = TD3(
+                self._td3_policy,
+                worker_env,
+                _init_setup_model=True,
+                **worker_td3_kwargs,
+            )
 
         assert isinstance(self.manager.replay_buffer, HIROReplayBuffer)
         self.manager.replay_buffer.set_low_level_action_fn(
-            self._predict_worker_scaled_action
+            self._predict_worker_q_values
+            if self._discrete_worker
+            else self._predict_worker_scaled_action
         )
 
         # Expose manager policy for BaseAlgorithm.predict compatibility.
@@ -706,12 +764,23 @@ class HIRO(BaseAlgorithm):
         self, worker_observation: np.ndarray
     ) -> np.ndarray:
         """Predict scaled worker actions in ``[-1, 1]`` for correction scoring."""
+        assert isinstance(self.worker, TD3)
         with th.no_grad():
             obs_tensor = th.as_tensor(
                 worker_observation, dtype=th.float32, device=self.worker.device
             )
             action = self.worker.actor(obs_tensor)
         return action.detach().cpu().numpy().astype(np.float32)
+
+    def _predict_worker_q_values(self, worker_observation: np.ndarray) -> np.ndarray:
+        """Return Q-values for all discrete actions (used for correction scoring)."""
+        assert isinstance(self.worker, DQN)
+        with th.no_grad():
+            obs_tensor = th.as_tensor(
+                worker_observation, dtype=th.float32, device=self.worker.device
+            )
+            q_values = self.worker.q_net(obs_tensor)
+        return q_values.detach().cpu().numpy().astype(np.float32)
 
     def _sample_manager_goal(
         self, flat_obs: np.ndarray, deterministic: bool = False
@@ -731,12 +800,44 @@ class HIRO(BaseAlgorithm):
             np.float32
         )
 
+    def _flat_to_multi_discrete(self, flat_index: int) -> np.ndarray:
+        """Convert a flat integer index to a multi-discrete action array."""
+        assert self._multi_discrete_nvec is not None
+        result = np.zeros(len(self._multi_discrete_nvec), dtype=np.int64)
+        for i in reversed(range(len(self._multi_discrete_nvec))):
+            result[i] = flat_index % self._multi_discrete_nvec[i]
+            flat_index //= self._multi_discrete_nvec[i]
+        return result
+
+    def _multi_discrete_to_flat(self, action: np.ndarray) -> int:
+        """Convert a multi-discrete action array to a flat integer index."""
+        assert self._multi_discrete_nvec is not None
+        flat = 0
+        for i, n in enumerate(self._multi_discrete_nvec):
+            flat = flat * int(n) + int(action[i])
+        return flat
+
     def _sample_worker_action(
         self, worker_obs: np.ndarray, deterministic: bool = False
-    ) -> np.ndarray:
+    ) -> Union[np.ndarray, int]:
         """Sample low-level environment action with warmup and exploration."""
         if self.num_timesteps < self.learning_starts:
-            return self._env_action_space.sample().astype(np.float32)
+            if self._multi_discrete_nvec is not None:
+                assert self._worker_discrete_space is not None
+                return int(self._worker_discrete_space.sample())
+            return self._env_action_space.sample()
+
+        if self._discrete_worker:
+            action, _ = self.worker.predict(worker_obs[None, :], deterministic=True)
+            action_val = int(action[0])
+            if not deterministic and self.worker_exploration_noise > 0.0:
+                if np.random.rand() < self.worker_exploration_noise:
+                    if self._multi_discrete_nvec is not None:
+                        assert self._worker_discrete_space is not None
+                        action_val = int(self._worker_discrete_space.sample())
+                    else:
+                        action_val = int(self._env_action_space.sample())
+            return action_val
 
         action, _ = self.worker.predict(
             worker_obs[None, :], deterministic=deterministic
@@ -747,9 +848,8 @@ class HIRO(BaseAlgorithm):
                 0.0, self.worker_exploration_noise, size=action.shape
             ).astype(np.float32)
             action = action + noise
-        return np.clip(
-            action, self._env_action_space.low, self._env_action_space.high
-        ).astype(np.float32)
+        box_space = cast(spaces.Box, self._env_action_space)
+        return np.clip(action, box_space.low, box_space.high).astype(np.float32)
 
     def _extract_transition_next_obs(
         self,
@@ -820,7 +920,9 @@ class HIRO(BaseAlgorithm):
         """
         if isinstance(self.manager.replay_buffer, HIROReplayBuffer):
             self.manager.replay_buffer.set_low_level_action_fn(
-                self._predict_worker_scaled_action
+                self._predict_worker_q_values
+                if self._discrete_worker
+                else self._predict_worker_scaled_action
             )
 
         worker_buffer_size = (
@@ -949,7 +1051,18 @@ class HIRO(BaseAlgorithm):
             worker_obs = make_worker_observation(flat_obs, self._active_goal)
             env_action = self._sample_worker_action(worker_obs, deterministic=False)
 
-            new_obs, rewards, dones, infos = self.env.step(env_action[None, :])
+            if self._discrete_worker:
+                if self._multi_discrete_nvec is not None:
+                    md_action = self._flat_to_multi_discrete(int(env_action))
+                    new_obs, rewards, dones, infos = self.env.step(md_action[None, :])
+                else:
+                    new_obs, rewards, dones, infos = self.env.step(
+                        np.array([int(env_action)])
+                    )
+            else:
+                new_obs, rewards, dones, infos = self.env.step(
+                    np.asarray(env_action)[None, :]
+                )
             new_obs = cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
             reward = float(rewards[0])
             done = bool(dones[0])
@@ -964,22 +1077,34 @@ class HIRO(BaseAlgorithm):
             intrinsic_reward = -float(np.linalg.norm(transitioned_goal, ord=2))
 
             worker_next_obs = make_worker_observation(next_flat_obs, transitioned_goal)
-            scaled_worker_action = self.worker.policy.scale_action(env_action[None, :])[
-                0
-            ].astype(np.float32)
-            self.worker.replay_buffer.add(
-                obs=worker_obs[None, :].astype(np.float32),
-                next_obs=worker_next_obs[None, :].astype(np.float32),
-                action=scaled_worker_action[None, :],
-                reward=np.array([intrinsic_reward], dtype=np.float32),
-                done=np.array([float(done)], dtype=np.float32),
-                infos=[info],
-            )
+            if self._discrete_worker:
+                worker_action_to_store = np.array([float(env_action)], dtype=np.float32)
+                self.worker.replay_buffer.add(
+                    obs=worker_obs[None, :].astype(np.float32),
+                    next_obs=worker_next_obs[None, :].astype(np.float32),
+                    action=np.array([[int(env_action)]]),
+                    reward=np.array([intrinsic_reward], dtype=np.float32),
+                    done=np.array([float(done)], dtype=np.float32),
+                    infos=[info],
+                )
+            else:
+                scaled_worker_action = self.worker.policy.scale_action(
+                    np.asarray(env_action)[None, :]
+                )[0].astype(np.float32)
+                worker_action_to_store = scaled_worker_action
+                self.worker.replay_buffer.add(
+                    obs=worker_obs[None, :].astype(np.float32),
+                    next_obs=worker_next_obs[None, :].astype(np.float32),
+                    action=scaled_worker_action[None, :],
+                    reward=np.array([intrinsic_reward], dtype=np.float32),
+                    done=np.array([float(done)], dtype=np.float32),
+                    infos=[info],
+                )
 
             self._macro.total_reward += reward
             self._macro.micro_obs.append(flat_obs.copy())
             self._macro.micro_next_obs.append(next_flat_obs.copy())
-            self._macro.micro_actions.append(scaled_worker_action.copy())
+            self._macro.micro_actions.append(worker_action_to_store.copy())
             self._macro.micro_projected_obs.append(projected_obs.copy())
             self._macro.micro_projected_next_obs.append(projected_next_obs.copy())
 
