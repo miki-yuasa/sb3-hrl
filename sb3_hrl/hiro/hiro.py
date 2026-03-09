@@ -565,7 +565,7 @@ class HIRO(BaseAlgorithm):
             tensorboard_log=tensorboard_log,
             verbose=verbose,
             device=device,
-            support_multi_env=False,
+            support_multi_env=True,
             monitor_wrapper=True,
             seed=seed,
             use_sde=False,
@@ -643,9 +643,9 @@ class HIRO(BaseAlgorithm):
         self.manager: TD3
         self.worker: Union[TD3, DQN]
 
-        self._active_goal: Optional[np.ndarray] = None
-        self._goal_step = 0
-        self._macro = _MacroTransitionAccumulator()
+        self._active_goals: list[Optional[np.ndarray]] = [None] * self.n_envs
+        self._goal_steps: list[int] = [0] * self.n_envs
+        self._macros = [_MacroTransitionAccumulator() for _ in range(self.n_envs)]
 
         self._setup_model()
 
@@ -751,14 +751,15 @@ class HIRO(BaseAlgorithm):
             )
         return projected
 
-    def _extract_single_env_observation(
+    def _extract_env_observation(
         self,
         vec_obs: Union[np.ndarray, dict[str, np.ndarray]],
+        env_idx: int = 0,
     ) -> Union[np.ndarray, dict[str, np.ndarray]]:
         """Extract one-environment observation from VecEnv output."""
         if isinstance(vec_obs, dict):
-            return {key: value[0] for key, value in vec_obs.items()}
-        return vec_obs[0]
+            return {key: value[env_idx] for key, value in vec_obs.items()}
+        return vec_obs[env_idx]
 
     def _predict_worker_scaled_action(
         self, worker_observation: np.ndarray
@@ -854,6 +855,7 @@ class HIRO(BaseAlgorithm):
     def _extract_transition_next_obs(
         self,
         vec_next_obs: Union[np.ndarray, dict[str, np.ndarray]],
+        env_idx: int,
         done: bool,
         info: dict[str, Any],
     ) -> Union[np.ndarray, dict[str, np.ndarray]]:
@@ -862,33 +864,35 @@ class HIRO(BaseAlgorithm):
             return cast(
                 Union[np.ndarray, dict[str, np.ndarray]], info["terminal_observation"]
             )
-        return self._extract_single_env_observation(vec_next_obs)
+        return self._extract_env_observation(vec_next_obs, env_idx)
 
     def _finalize_macro_transition(
-        self, next_flat_obs: np.ndarray, done: bool, info: dict[str, Any]
+        self,
+        macro: _MacroTransitionAccumulator,
+        next_flat_obs: np.ndarray,
+        done: bool,
+        info: dict[str, Any],
     ) -> None:
         """Store one manager transition in replay buffer."""
-        if self._macro.start_obs is None or self._macro.start_goal is None:
+        if macro.start_obs is None or macro.start_goal is None:
             return
-        if len(self._macro.micro_obs) == 0:
+        if len(macro.micro_obs) == 0:
             return
 
-        manager_obs = self._macro.start_obs[None, :].astype(np.float32)
+        manager_obs = macro.start_obs[None, :].astype(np.float32)
         manager_next_obs = next_flat_obs[None, :].astype(np.float32)
         manager_action = self.manager.policy.scale_action(
-            self._macro.start_goal[None, :]
+            macro.start_goal[None, :]
         ).astype(np.float32)
-        manager_reward = np.array([self._macro.total_reward], dtype=np.float32)
+        manager_reward = np.array([macro.total_reward], dtype=np.float32)
         manager_done = np.array([float(done)], dtype=np.float32)
 
-        micro_obs = np.asarray(self._macro.micro_obs, dtype=np.float32)
-        micro_next_obs = np.asarray(self._macro.micro_next_obs, dtype=np.float32)
-        micro_actions = np.asarray(self._macro.micro_actions, dtype=np.float32)
-        micro_projected_obs = np.asarray(
-            self._macro.micro_projected_obs, dtype=np.float32
-        )
+        micro_obs = np.asarray(macro.micro_obs, dtype=np.float32)
+        micro_next_obs = np.asarray(macro.micro_next_obs, dtype=np.float32)
+        micro_actions = np.asarray(macro.micro_actions, dtype=np.float32)
+        micro_projected_obs = np.asarray(macro.micro_projected_obs, dtype=np.float32)
         micro_projected_next_obs = np.asarray(
-            self._macro.micro_projected_next_obs, dtype=np.float32
+            macro.micro_projected_next_obs, dtype=np.float32
         )
 
         assert isinstance(self.manager.replay_buffer, HIROReplayBuffer)
@@ -906,7 +910,7 @@ class HIRO(BaseAlgorithm):
             micro_projected_next_observations=micro_projected_next_obs,
         )
 
-        self._macro.reset()
+        macro.reset()
 
     def train(self, gradient_steps: int, batch_size: int) -> None:
         """Train worker and manager TD3 components.
@@ -1035,80 +1039,141 @@ class HIRO(BaseAlgorithm):
         assert self._last_obs is not None
         assert self.worker.replay_buffer is not None
 
+        n_envs = self.env.num_envs
+        _steps_since_train = 0
+
         while self.num_timesteps < total_timesteps:
             vec_obs = cast(Union[np.ndarray, dict[str, np.ndarray]], self._last_obs)
-            obs = self._extract_single_env_observation(vec_obs)
-            flat_obs = flatten_observation(self.observation_space, obs)
 
-            if self._active_goal is None:
-                self._active_goal = self._sample_manager_goal(
-                    flat_obs, deterministic=False
-                )
-                self._goal_step = 0
-                self._macro.start_obs = flat_obs.copy()
-                self._macro.start_goal = self._active_goal.copy()
+            # --- Prepare per-env observations and actions ---
+            obs_list: list[Union[np.ndarray, dict[str, np.ndarray]]] = []
+            flat_obs_list: list[np.ndarray] = []
+            worker_obs_list: list[np.ndarray] = []
 
-            worker_obs = make_worker_observation(flat_obs, self._active_goal)
-            env_action = self._sample_worker_action(worker_obs, deterministic=False)
+            for env_idx in range(n_envs):
+                obs_i = self._extract_env_observation(vec_obs, env_idx)
+                flat_i = flatten_observation(self.observation_space, obs_i)
+                obs_list.append(obs_i)
+                flat_obs_list.append(flat_i)
 
+                if self._active_goals[env_idx] is None:
+                    self._active_goals[env_idx] = self._sample_manager_goal(
+                        flat_i, deterministic=False
+                    )
+                    self._goal_steps[env_idx] = 0
+                    self._macros[env_idx].start_obs = flat_i.copy()
+                    self._macros[env_idx].start_goal = self._active_goals[
+                        env_idx
+                    ].copy()  # type: ignore[union-attr]
+
+                goal_i = self._active_goals[env_idx]
+                assert goal_i is not None
+                worker_obs_i = make_worker_observation(flat_i, goal_i)
+                worker_obs_list.append(worker_obs_i)
+
+            env_actions = [
+                self._sample_worker_action(w_obs, deterministic=False)
+                for w_obs in worker_obs_list
+            ]
+
+            # --- Batch step all envs ---
             if self._discrete_worker:
                 if self._multi_discrete_nvec is not None:
-                    md_action = self._flat_to_multi_discrete(int(env_action))
-                    new_obs, rewards, dones, infos = self.env.step(md_action[None, :])
-                else:
-                    new_obs, rewards, dones, infos = self.env.step(
-                        np.array([int(env_action)])
+                    action_array = np.stack(
+                        [self._flat_to_multi_discrete(int(a)) for a in env_actions]
                     )
+                else:
+                    action_array = np.array([int(a) for a in env_actions])
             else:
-                new_obs, rewards, dones, infos = self.env.step(
-                    np.asarray(env_action)[None, :]
-                )
+                action_array = np.stack([np.asarray(a) for a in env_actions])
+
+            new_obs, rewards, dones, infos = self.env.step(action_array)
             new_obs = cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
-            reward = float(rewards[0])
-            done = bool(dones[0])
-            info = infos[0]
 
-            next_obs = self._extract_transition_next_obs(new_obs, done, info)
-            next_flat_obs = flatten_observation(self.observation_space, next_obs)
-            projected_obs = self._project_state(obs)
-            projected_next_obs = self._project_state(next_obs)
+            # --- Process each env's result ---
+            for env_idx in range(n_envs):
+                obs_i = obs_list[env_idx]
+                flat_obs_i = flat_obs_list[env_idx]
+                worker_obs_i = worker_obs_list[env_idx]
+                env_action_i = env_actions[env_idx]
+                reward_i = float(rewards[env_idx])
+                done_i = bool(dones[env_idx])
+                info_i = infos[env_idx]
 
-            transitioned_goal = projected_obs + self._active_goal - projected_next_obs
-            intrinsic_reward = -float(np.linalg.norm(transitioned_goal, ord=2))
-
-            worker_next_obs = make_worker_observation(next_flat_obs, transitioned_goal)
-            if self._discrete_worker:
-                worker_action_to_store = np.array([float(env_action)], dtype=np.float32)
-                self.worker.replay_buffer.add(
-                    obs=worker_obs[None, :].astype(np.float32),
-                    next_obs=worker_next_obs[None, :].astype(np.float32),
-                    action=np.array([[int(env_action)]]),
-                    reward=np.array([intrinsic_reward], dtype=np.float32),
-                    done=np.array([float(done)], dtype=np.float32),
-                    infos=[info],
+                next_obs_i = self._extract_transition_next_obs(
+                    new_obs, env_idx, done_i, info_i
                 )
-            else:
-                scaled_worker_action = self.worker.policy.scale_action(
-                    np.asarray(env_action)[None, :]
-                )[0].astype(np.float32)
-                worker_action_to_store = scaled_worker_action
-                self.worker.replay_buffer.add(
-                    obs=worker_obs[None, :].astype(np.float32),
-                    next_obs=worker_next_obs[None, :].astype(np.float32),
-                    action=scaled_worker_action[None, :],
-                    reward=np.array([intrinsic_reward], dtype=np.float32),
-                    done=np.array([float(done)], dtype=np.float32),
-                    infos=[info],
+                next_flat_i = flatten_observation(self.observation_space, next_obs_i)
+                projected_obs_i = self._project_state(obs_i)
+                projected_next_i = self._project_state(next_obs_i)
+
+                assert self._active_goals[env_idx] is not None
+                transitioned_goal = (
+                    projected_obs_i + self._active_goals[env_idx] - projected_next_i
                 )
+                intrinsic_reward = -float(np.linalg.norm(transitioned_goal, ord=2))
 
-            self._macro.total_reward += reward
-            self._macro.micro_obs.append(flat_obs.copy())
-            self._macro.micro_next_obs.append(next_flat_obs.copy())
-            self._macro.micro_actions.append(worker_action_to_store.copy())
-            self._macro.micro_projected_obs.append(projected_obs.copy())
-            self._macro.micro_projected_next_obs.append(projected_next_obs.copy())
+                worker_next_obs = make_worker_observation(
+                    next_flat_i, transitioned_goal
+                )
+                if self._discrete_worker:
+                    worker_action_to_store = np.array(
+                        [float(env_action_i)], dtype=np.float32
+                    )
+                    self.worker.replay_buffer.add(
+                        obs=worker_obs_i[None, :].astype(np.float32),
+                        next_obs=worker_next_obs[None, :].astype(np.float32),
+                        action=np.array([[int(env_action_i)]]),
+                        reward=np.array([intrinsic_reward], dtype=np.float32),
+                        done=np.array([float(done_i)], dtype=np.float32),
+                        infos=[info_i],
+                    )
+                else:
+                    scaled_worker_action = self.worker.policy.scale_action(
+                        np.asarray(env_action_i)[None, :]
+                    )[0].astype(np.float32)
+                    worker_action_to_store = scaled_worker_action
+                    self.worker.replay_buffer.add(
+                        obs=worker_obs_i[None, :].astype(np.float32),
+                        next_obs=worker_next_obs[None, :].astype(np.float32),
+                        action=scaled_worker_action[None, :],
+                        reward=np.array([intrinsic_reward], dtype=np.float32),
+                        done=np.array([float(done_i)], dtype=np.float32),
+                        infos=[info_i],
+                    )
 
-            self.num_timesteps += 1
+                macro = self._macros[env_idx]
+                macro.total_reward += reward_i
+                macro.micro_obs.append(flat_obs_i.copy())
+                macro.micro_next_obs.append(next_flat_i.copy())
+                macro.micro_actions.append(worker_action_to_store.copy())
+                macro.micro_projected_obs.append(projected_obs_i.copy())
+                macro.micro_projected_next_obs.append(projected_next_i.copy())
+
+                macro_done = done_i or (
+                    self._goal_steps[env_idx] + 1 >= self.subgoal_freq
+                )
+                if macro_done:
+                    self._finalize_macro_transition(macro, next_flat_i, done_i, info_i)
+
+                if done_i:
+                    self._episode_num += 1
+                    self._active_goals[env_idx] = None
+                    self._goal_steps[env_idx] = 0
+                    self._macros[env_idx].reset()
+                    if log_interval > 0 and self._episode_num % log_interval == 0:
+                        self.dump_logs()
+                else:
+                    if macro_done:
+                        self._active_goals[env_idx] = None
+                        self._goal_steps[env_idx] = 0
+                    else:
+                        self._active_goals[env_idx] = transitioned_goal.astype(
+                            np.float32
+                        )
+                        self._goal_steps[env_idx] += 1
+
+            self.num_timesteps += n_envs
             self._update_info_buffer(infos, dones)
             self._last_obs = new_obs
 
@@ -1116,32 +1181,13 @@ class HIRO(BaseAlgorithm):
             if not callback.on_step():
                 break
 
-            macro_done = done or (self._goal_step + 1 >= self.subgoal_freq)
-            if macro_done:
-                self._finalize_macro_transition(
-                    next_flat_obs=next_flat_obs, done=done, info=info
-                )
-
-            if done:
-                self._episode_num += 1
-                self._active_goal = None
-                self._goal_step = 0
-                self._macro.reset()
-                if log_interval > 0 and self._episode_num % log_interval == 0:
-                    self.dump_logs()
-            else:
-                if macro_done:
-                    self._active_goal = None
-                    self._goal_step = 0
-                else:
-                    self._active_goal = transitioned_goal.astype(np.float32)
-                    self._goal_step += 1
-
+            _steps_since_train += 1
             if (
                 self.num_timesteps > self.learning_starts
                 and self.train_freq > 0
-                and self.num_timesteps % self.train_freq == 0
+                and _steps_since_train >= self.train_freq
             ):
+                _steps_since_train = 0
                 self._update_current_progress_remaining(
                     self.num_timesteps, total_timesteps
                 )
