@@ -1329,5 +1329,20 @@ class HIRO(BaseAlgorithm):
         return super()._excluded_save_params() + ["manager", "worker"]
 
     def _get_torch_save_params(self) -> tuple[list[str], list[str]]:
-        """Register nested model parameters for SB3 save/load."""
-        return ["manager", "worker"], []
+        """Register nested model parameters for SB3 save/load.
+
+        SB3 expects each entry in ``state_dicts`` to expose ``state_dict()``.
+        ``manager``/``worker`` are algorithms, so we must point to their policy
+        and optimizer objects explicitly.
+        """
+        state_dicts = [
+            "manager.policy",
+            "manager.actor.optimizer",
+            "manager.critic.optimizer",
+            "worker.policy",
+        ]
+        if self._discrete_worker:
+            state_dicts.append("worker.policy.optimizer")
+        else:
+            state_dicts.extend(["worker.actor.optimizer", "worker.critic.optimizer"])
+        return state_dicts, []
