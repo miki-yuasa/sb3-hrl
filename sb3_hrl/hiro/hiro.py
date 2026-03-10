@@ -651,6 +651,10 @@ class HIRO(BaseAlgorithm):
         self._goal_steps: list[int] = [0] * self.n_envs
         self._macros = [_MacroTransitionAccumulator() for _ in range(self.n_envs)]
 
+        # Inference-time hierarchy state used by predict().
+        self._predict_goals: list[Optional[np.ndarray]] = [None] * self.n_envs
+        self._predict_goal_steps: list[int] = [0] * self.n_envs
+
         self._setup_model()
 
     def _setup_model(self) -> None:
@@ -1208,46 +1212,117 @@ class HIRO(BaseAlgorithm):
         episode_start: Optional[np.ndarray] = None,
         deterministic: bool = False,
     ) -> tuple[np.ndarray, Optional[tuple[np.ndarray, ...]]]:
-        """Predict a manager subgoal for an environment observation.
+        """Predict worker actions for an environment observation.
 
         Parameters
         ----------
-        observation : np.ndarray
-                Environment observation.
+        observation : np.ndarray | dict[str, np.ndarray]
+            Environment observation (single or vectorized).
         state : tuple[np.ndarray, ...], optional
                 Unused recurrent state placeholder for SB3 compatibility.
         episode_start : np.ndarray, optional
                 Unused recurrent mask placeholder for SB3 compatibility.
         deterministic : bool, default=False
-                Whether to use deterministic manager action.
+                Whether to use deterministic manager/worker actions.
 
         Returns
         -------
         tuple[np.ndarray, Optional[tuple[np.ndarray, ...]]]
-                Predicted manager subgoal and unchanged recurrent state.
+                Predicted worker action(s) and unchanged recurrent state.
         """
+        # Determine whether observations are batched (VecEnv-style) and split into
+        # per-env observations in the original observation-space format.
         if isinstance(observation, dict):
-            raise TypeError("HIRO.predict currently expects ndarray observations.")
+            assert isinstance(self.observation_space, spaces.Dict)
+            key0 = next(iter(self.observation_space.spaces.keys()))
+            key_space = self.observation_space.spaces[key0]
+            key_obs = observation[key0]
+            key_shape = key_space.shape if key_space.shape is not None else ()
+            is_batched = key_obs.ndim > len(key_shape)
+            n_envs = int(key_obs.shape[0]) if is_batched else 1
+            obs_list: list[Union[np.ndarray, dict[str, np.ndarray]]] = [
+                (
+                    {k: v[i] for k, v in observation.items()}
+                    if is_batched
+                    else observation
+                )
+                for i in range(n_envs)
+            ]
+        else:
+            obs_shape = self.observation_space.shape
+            if obs_shape is None:
+                raise ValueError(
+                    "Observation space shape must be defined for HIRO.predict."
+                )
+            is_batched = observation.ndim > len(obs_shape)
+            n_envs = int(observation.shape[0]) if is_batched else 1
+            obs_list = [
+                observation[i] if is_batched else observation for i in range(n_envs)
+            ]
 
-        obs_shape = self.observation_space.shape
-        if obs_shape is None:
-            raise ValueError(
-                "Observation space shape must be defined for HIRO.predict."
-            )
+        # Align inference state buffers with the current batch size.
+        if len(self._predict_goals) != n_envs:
+            self._predict_goals = [None] * n_envs
+            self._predict_goal_steps = [0] * n_envs
 
-        if observation.ndim == len(obs_shape):
-            flat = flatten_observation(self.observation_space, observation)
-            subgoal, _ = self.manager.predict(
-                flat[None, :], deterministic=deterministic
-            )
-            return subgoal, state
+        if episode_start is not None:
+            episode_start_arr = np.asarray(episode_start).reshape(-1)
+            if episode_start_arr.size == 1 and n_envs > 1:
+                episode_start_arr = np.repeat(episode_start_arr, n_envs)
+            for i in range(min(n_envs, episode_start_arr.size)):
+                if bool(episode_start_arr[i]):
+                    self._predict_goals[i] = None
+                    self._predict_goal_steps[i] = 0
 
-        flat_batch = np.stack(
-            [flatten_observation(self.observation_space, obs) for obs in observation],
-            axis=0,
+        actions_out: list[Union[np.ndarray, int]] = []
+        for env_idx, obs_i in enumerate(obs_list):
+            flat_i = flatten_observation(self.observation_space, obs_i)
+
+            if self._predict_goals[env_idx] is None:
+                self._predict_goals[env_idx] = self._sample_manager_goal(
+                    flat_i, deterministic=deterministic
+                )
+                self._predict_goal_steps[env_idx] = 0
+
+            goal_i = self._predict_goals[env_idx]
+            assert goal_i is not None
+            worker_obs = make_worker_observation(flat_i, goal_i)
+
+            if self._discrete_worker:
+                action, _ = self.worker.predict(
+                    worker_obs[None, :], deterministic=deterministic
+                )
+                action_value = int(action[0])
+                if self._multi_discrete_nvec is not None:
+                    actions_out.append(self._flat_to_multi_discrete(action_value))
+                else:
+                    actions_out.append(action_value)
+            else:
+                action, _ = self.worker.predict(
+                    worker_obs[None, :], deterministic=deterministic
+                )
+                actions_out.append(action[0].astype(np.float32))
+
+            self._predict_goal_steps[env_idx] += 1
+            if self._predict_goal_steps[env_idx] >= self.subgoal_freq:
+                self._predict_goals[env_idx] = None
+                self._predict_goal_steps[env_idx] = 0
+
+        if self._discrete_worker:
+            if self._multi_discrete_nvec is not None:
+                result = np.stack([np.asarray(a) for a in actions_out], axis=0)
+            else:
+                result = np.asarray(actions_out, dtype=np.int64)
+            if not is_batched:
+                result = np.asarray(result[0])
+            return result, state
+
+        result = np.stack([np.asarray(a) for a in actions_out], axis=0).astype(
+            np.float32
         )
-        subgoals, _ = self.manager.predict(flat_batch, deterministic=deterministic)
-        return subgoals, state
+        if not is_batched:
+            result = result[0]
+        return result, state
 
     def _excluded_save_params(self) -> list[str]:
         """Exclude nested TD3 models from pickle payload."""
