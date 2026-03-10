@@ -419,9 +419,9 @@ class HIROReplayBuffer(ReplayBuffer):
             states_expanded = np.broadcast_to(
                 states[None, :, :], (num_cands, length, states.shape[1])
             )
-            worker_obs_block = np.concatenate(
-                [states_expanded, goals], axis=2
-            ).astype(np.float32)
+            worker_obs_block = np.concatenate([states_expanded, goals], axis=2).astype(
+                np.float32
+            )
             # Flatten to (C*L, obs_dim)
             all_worker_obs_chunks.append(
                 worker_obs_block.reshape(-1, worker_obs_block.shape[-1])
@@ -456,8 +456,10 @@ class HIROReplayBuffer(ReplayBuffer):
 
             if self._discrete_worker:
                 max_q = np.max(preds, axis=2, keepdims=True)
-                log_probs = preds - max_q - np.log(
-                    np.sum(np.exp(preds - max_q), axis=2, keepdims=True)
+                log_probs = (
+                    preds
+                    - max_q
+                    - np.log(np.sum(np.exp(preds - max_q), axis=2, keepdims=True))
                 )
                 action_indices = actions[:, 0].astype(np.int64)
                 selected = log_probs[:, np.arange(length), action_indices]
