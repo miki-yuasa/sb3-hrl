@@ -545,6 +545,7 @@ class HIRO(BaseAlgorithm):
         verbose: int = 0,
         device: Union[th.device, str] = "auto",
         seed: Optional[int] = None,
+        _init_setup_model: bool = True,
     ) -> None:
         # BaseAlgorithm validates policy/obs-space consistency.  For Dict
         # observation spaces we must satisfy that check with MultiInputPolicy,
@@ -655,7 +656,8 @@ class HIRO(BaseAlgorithm):
         self._predict_goals: list[Optional[np.ndarray]] = [None] * self.n_envs
         self._predict_goal_steps: list[int] = [0] * self.n_envs
 
-        self._setup_model()
+        if _init_setup_model:
+            self._setup_model()
 
     def _setup_model(self) -> None:
         """Initialize manager and worker TD3 models and replay buffers."""
