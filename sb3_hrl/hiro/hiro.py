@@ -552,6 +552,7 @@ class HIRO(BaseAlgorithm):
         # even though HIRO always flattens observations internally.
         if (
             isinstance(policy, str)
+            and env is not None
             and not isinstance(env, str)
             and isinstance(env.observation_space, spaces.Dict)
         ):
@@ -575,6 +576,11 @@ class HIRO(BaseAlgorithm):
             sde_sample_freq=-1,
             supported_action_spaces=(spaces.Box, spaces.Discrete, spaces.MultiDiscrete),
         )
+
+        if not _init_setup_model:
+            # Bare skeleton for BaseAlgorithm.load(): __dict__ will be
+            # populated from the saved checkpoint before _setup_model runs.
+            return
 
         self._discrete_worker = isinstance(
             self.action_space, (spaces.Discrete, spaces.MultiDiscrete)
@@ -661,10 +667,6 @@ class HIRO(BaseAlgorithm):
 
     def _setup_model(self) -> None:
         """Initialize manager and worker TD3 models and replay buffers."""
-        if self.env is None:
-            raise ValueError("Environment must be defined before model setup.")
-        if not isinstance(self.env, VecEnv):
-            raise TypeError("HIRO expects a vectorized environment internally.")
 
         manager_env = _SpaceOverrideEnv(
             observation_space=self._flat_obs_space,
