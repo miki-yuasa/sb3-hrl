@@ -363,22 +363,27 @@ class HIROReplayBuffer(ReplayBuffer):
         relabeled = current_actions.copy()
         sigma = max(self.correction_action_sigma, 1e-6)
 
+        # Phase 1: Build all worker observations for a single batched NN call.
+        all_worker_obs_chunks: list[np.ndarray] = []
+        # Per-sample metadata: (num_candidates, length) or None if skipped.
+        sample_meta: list[Optional[tuple[int, int]]] = []
+        sample_candidates_list: list[Optional[list[np.ndarray]]] = []
+
         for sample_i, (buffer_idx, env_idx) in enumerate(zip(batch_inds, env_indices)):
             length = int(self.micro_lengths[buffer_idx, env_idx])
             if length <= 0:
+                sample_meta.append(None)
+                sample_candidates_list.append(None)
                 continue
 
             states = self.micro_obs[buffer_idx, env_idx, :length]
-            actions = self.micro_actions[buffer_idx, env_idx, :length]
             projected_states = self.micro_projected_obs[buffer_idx, env_idx, :length]
             projected_next_states = self.micro_projected_next_obs[
                 buffer_idx, env_idx, :length
             ]
 
             old_goal = self._unscale_action(current_actions[sample_i])
-            start_proj = projected_states[0]
-            end_proj = projected_next_states[length - 1]
-            delta_goal = end_proj - start_proj
+            delta_goal = projected_next_states[length - 1] - projected_states[0]
 
             candidates = [old_goal.astype(np.float32), delta_goal.astype(np.float32)]
 
@@ -399,42 +404,70 @@ class HIROReplayBuffer(ReplayBuffer):
                 )
                 candidates.extend(list(sampled))
 
-            best_goal = old_goal
-            best_score = -np.inf
+            num_cands = len(candidates)
+            cand_array = np.stack(candidates)  # (C, goal_dim)
 
-            for candidate in candidates:
-                score = 0.0
-                current_goal = candidate.astype(np.float32, copy=True)
+            # Precompute goal at each step via telescoping sum:
+            #   g[t] = candidate + sum_{k=0}^{t-1} (proj_s[k] - proj_ns[k])
+            goal_deltas = projected_states - projected_next_states  # (L, goal_dim)
+            cumulative_deltas = np.cumsum(goal_deltas, axis=0)
+            goal_shifts = np.zeros_like(cumulative_deltas)  # (L, goal_dim)
+            goal_shifts[1:] = cumulative_deltas[:-1]
 
-                for step_idx in range(length):
-                    worker_obs = np.concatenate(
-                        [states[step_idx], current_goal], axis=0
-                    ).astype(np.float32, copy=False)
+            # goals[c, t] = candidate[c] + goal_shifts[t]
+            goals = cand_array[:, None, :] + goal_shifts[None, :, :]  # (C, L, goal_dim)
+            states_expanded = np.broadcast_to(
+                states[None, :, :], (num_cands, length, states.shape[1])
+            )
+            worker_obs_block = np.concatenate(
+                [states_expanded, goals], axis=2
+            ).astype(np.float32)
+            # Flatten to (C*L, obs_dim)
+            all_worker_obs_chunks.append(
+                worker_obs_block.reshape(-1, worker_obs_block.shape[-1])
+            )
 
-                    if self._discrete_worker:
-                        q_values = self._low_level_action_fn(worker_obs[None, :])[0]
-                        max_q = np.max(q_values)
-                        log_probs = (
-                            q_values - max_q - np.log(np.sum(np.exp(q_values - max_q)))
-                        )
-                        action_idx = int(actions[step_idx, 0])
-                        score += float(log_probs[action_idx])
-                    else:
-                        predicted_action = self._low_level_action_fn(
-                            worker_obs[None, :]
-                        )[0]
-                        diff = actions[step_idx] - predicted_action
-                        score += float(-0.5 * np.sum((diff / sigma) ** 2))
+            sample_meta.append((num_cands, length))
+            sample_candidates_list.append(candidates)
 
-                    projected_state = projected_states[step_idx]
-                    projected_next_state = projected_next_states[step_idx]
-                    current_goal = projected_state + current_goal - projected_next_state
+        if not all_worker_obs_chunks:
+            return relabeled
 
-                if score > best_score:
-                    best_score = score
-                    best_goal = candidate
+        # Phase 2: Single batched forward pass through the worker network.
+        all_worker_obs_array = np.concatenate(all_worker_obs_chunks, axis=0)
+        all_predictions = self._low_level_action_fn(all_worker_obs_array)
 
-            relabeled[sample_i] = self._scale_action(best_goal)
+        # Phase 3: Vectorised scoring per sample.
+        pred_offset = 0
+        for sample_i, (buffer_idx, env_idx) in enumerate(zip(batch_inds, env_indices)):
+            meta = sample_meta[sample_i]
+            if meta is None:
+                continue
+            num_cands, length = meta
+            candidates = sample_candidates_list[sample_i]
+            assert candidates is not None
+            actions = self.micro_actions[buffer_idx, env_idx, :length]
+
+            block_size = num_cands * length
+            preds = all_predictions[pred_offset : pred_offset + block_size].reshape(
+                num_cands, length, -1
+            )
+            pred_offset += block_size
+
+            if self._discrete_worker:
+                max_q = np.max(preds, axis=2, keepdims=True)
+                log_probs = preds - max_q - np.log(
+                    np.sum(np.exp(preds - max_q), axis=2, keepdims=True)
+                )
+                action_indices = actions[:, 0].astype(np.int64)
+                selected = log_probs[:, np.arange(length), action_indices]
+                scores = np.sum(selected, axis=1)
+            else:
+                diffs = actions[None, :, :] - preds
+                scores = -0.5 * np.sum((diffs / sigma) ** 2, axis=(1, 2))
+
+            best_idx = int(np.argmax(scores))
+            relabeled[sample_i] = self._scale_action(candidates[best_idx])
 
         return relabeled
 
