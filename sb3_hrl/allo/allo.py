@@ -703,6 +703,8 @@ class ALLO(BaseAlgorithm):
             progress_bar=progress_bar,
         )
 
+        callback.on_training_start(locals(), globals())
+
         iteration = 0
         while self.num_timesteps < total_timesteps:
             collect_steps = min(self.train_freq, total_timesteps - self.num_timesteps)
@@ -721,6 +723,7 @@ class ALLO(BaseAlgorithm):
                 self.logger.record("time/iterations", iteration, exclude="tensorboard")
                 self.logger.dump(step=self.num_timesteps)
 
+            callback.update_locals(locals())
             if not callback.on_step():
                 break
 
