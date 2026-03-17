@@ -68,7 +68,7 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 
 
 class _LaplacianFeatureNet(th.nn.Module):
-    """Neural feature extractor used by :class:`ALLOAlgorithm`.
+    """Neural feature extractor used by :class:`ALLO`.
 
     Parameters
     ----------
@@ -112,7 +112,7 @@ class _LaplacianFeatureNet(th.nn.Module):
         return self.model(observations)
 
 
-class ALLOAlgorithm(BaseAlgorithm):
+class ALLO(BaseAlgorithm):
     """ALLO pretrainer for Laplacian representation learning.
 
     Notes
@@ -237,9 +237,7 @@ class ALLOAlgorithm(BaseAlgorithm):
 
         self._flat_obs_space = space_utils.flatten_space(self.observation_space)
         if not isinstance(self._flat_obs_space, spaces.Box):
-            raise TypeError(
-                "ALLOAlgorithm requires a flattenable Box observation space."
-            )
+            raise TypeError("ALLO requires a flattenable Box observation space.")
         self._obs_dim = int(np.prod(self._flat_obs_space.shape))
         obs_shape = self.observation_space.shape
         self._obs_ndim = len(obs_shape) if obs_shape is not None else 1
@@ -258,7 +256,7 @@ class ALLOAlgorithm(BaseAlgorithm):
         )
         self._lag_probs = lag_weights / np.sum(lag_weights)
 
-        self._allo_last_obs: Optional[np.ndarray] = None
+        self._allo_last_obs: Optional[Union[np.ndarray, dict[str, np.ndarray]]] = None
 
         self._setup_model()
 
@@ -277,7 +275,7 @@ class ALLOAlgorithm(BaseAlgorithm):
         """
         self.replay_buffer = ReplayBuffer(
             buffer_size=self.buffer_size,
-            observation_space=self.observation_space,
+            observation_space=self._flat_obs_space,
             action_space=self.action_space,
             device=self.device,
             n_envs=self.n_envs,
@@ -345,12 +343,68 @@ class ALLOAlgorithm(BaseAlgorithm):
         batch_size = observations.shape[0]
         return observations.reshape(batch_size, -1).astype(np.float32, copy=False)
 
-    def encode(self, observations: Union[np.ndarray, th.Tensor]) -> th.Tensor:
+    def _flatten_single_observation(
+        self, observation: Union[np.ndarray, dict[str, np.ndarray]]
+    ) -> np.ndarray:
+        """Flatten one environment observation.
+
+        Parameters
+        ----------
+        observation : np.ndarray | dict[str, np.ndarray]
+            Single observation compatible with ``self.observation_space``.
+
+        Returns
+        -------
+        np.ndarray
+            Flattened 1D observation of shape ``[obs_dim]``.
+        """
+        flat = space_utils.flatten(self.observation_space, observation)
+        return np.asarray(flat, dtype=np.float32).reshape(-1)
+
+    def _flatten_vec_observations(
+        self, observations: Union[np.ndarray, dict[str, np.ndarray]]
+    ) -> np.ndarray:
+        """Flatten single or vectorized observations into ``[batch_size, obs_dim]``.
+
+        Parameters
+        ----------
+        observations : np.ndarray | dict[str, np.ndarray]
+            Observation returned by env reset/step.
+
+        Returns
+        -------
+        np.ndarray
+            Flattened observations with shape ``[batch_size, obs_dim]``.
+        """
+        if isinstance(observations, dict):
+            # VecEnv dict observations are key->array with first dim as n_envs.
+            first_key = next(iter(observations))
+            first_val = np.asarray(observations[first_key])
+            is_batched = first_val.ndim >= 1 and first_val.shape[0] == self.n_envs
+            if not is_batched:
+                return self._flatten_single_observation(observations)[None, :]
+
+            flattened = []
+            for i in range(self.n_envs):
+                single_obs = {
+                    key: np.asarray(value)[i] for key, value in observations.items()
+                }
+                flattened.append(self._flatten_single_observation(single_obs))
+            return np.stack(flattened, axis=0)
+
+        obs_array = np.asarray(observations)
+        if obs_array.ndim == self._obs_ndim:
+            return self._flatten_observations(obs_array[None, ...])
+        return self._flatten_observations(obs_array)
+
+    def encode(
+        self, observations: Union[np.ndarray, dict[str, np.ndarray], th.Tensor]
+    ) -> th.Tensor:
         """Encode observations into Laplacian features.
 
         Parameters
         ----------
-        observations : np.ndarray | torch.Tensor
+        observations : np.ndarray | dict[str, np.ndarray] | torch.Tensor
             Single observation of shape ``[*obs_shape]`` or batch of shape
             ``[batch_size, *obs_shape]``.
 
@@ -359,11 +413,8 @@ class ALLOAlgorithm(BaseAlgorithm):
         torch.Tensor
             Encoded features with shape ``[batch_size, representation_dim]``.
         """
-        if isinstance(observations, np.ndarray):
-            obs_np = observations
-            if obs_np.ndim == self._obs_ndim:
-                obs_np = np.expand_dims(obs_np, axis=0)
-            flat = self._flatten_observations(obs_np)
+        if isinstance(observations, (np.ndarray, dict)):
+            flat = self._flatten_vec_observations(observations)
             obs_tensor = th.as_tensor(flat, dtype=th.float32, device=self.device)
         else:
             obs_tensor = observations.to(self.device)
@@ -440,34 +491,35 @@ class ALLOAlgorithm(BaseAlgorithm):
             Appends sampled transitions to the replay buffer.
         """
         if self.env is None:
-            raise RuntimeError("ALLOAlgorithm environment is not initialized.")
+            raise RuntimeError("ALLO environment is not initialized.")
         if self._allo_last_obs is None:
             reset_obs = self.env.reset()
-            if isinstance(reset_obs, dict):
-                raise TypeError(
-                    "ALLOAlgorithm currently does not support Dict observations."
-                )
-            self._allo_last_obs = np.asarray(reset_obs)
+            self._allo_last_obs = cast(
+                Union[np.ndarray, dict[str, np.ndarray]], reset_obs
+            )
 
         for _ in range(n_steps):
             actions = np.array([self.action_space.sample() for _ in range(self.n_envs)])
             new_obs, rewards, dones, infos = self.env.step(actions)
-            if isinstance(new_obs, dict):
-                raise TypeError(
-                    "ALLOAlgorithm currently does not support Dict observations."
-                )
-            new_obs_array = np.asarray(new_obs)
+            obs_batch = self._flatten_vec_observations(
+                cast(Union[np.ndarray, dict[str, np.ndarray]], self._allo_last_obs)
+            )
+            next_obs_batch = self._flatten_vec_observations(
+                cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
+            )
 
             self.replay_buffer.add(
-                obs=cast(np.ndarray, self._allo_last_obs),
-                next_obs=new_obs_array,
+                obs=obs_batch,
+                next_obs=next_obs_batch,
                 action=actions,
                 reward=rewards,
                 done=dones,
                 infos=infos,
             )
 
-            self._allo_last_obs = new_obs_array
+            self._allo_last_obs = cast(
+                Union[np.ndarray, dict[str, np.ndarray]], new_obs
+            )
             self.num_timesteps += self.n_envs
 
     def train_step(self) -> dict[str, float]:
@@ -585,7 +637,7 @@ class ALLOAlgorithm(BaseAlgorithm):
         tb_log_name: str = "ALLO",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> "ALLOAlgorithm":
+    ) -> "ALLO":
         """Train ALLO representation network.
 
         Parameters
@@ -605,7 +657,7 @@ class ALLOAlgorithm(BaseAlgorithm):
 
         Returns
         -------
-        ALLOAlgorithm
+        ALLO
             Trained algorithm instance.
         """
         total_timesteps, callback = self._setup_learn(
@@ -641,4 +693,4 @@ class ALLOAlgorithm(BaseAlgorithm):
         return self
 
 
-__all__ = ["ALLOAlgorithm"]
+__all__ = ["ALLO"]

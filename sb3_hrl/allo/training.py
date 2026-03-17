@@ -11,13 +11,13 @@ from gymnasium import spaces
 from stable_baselines3 import DQN, PPO, SAC, TD3
 from stable_baselines3.common.base_class import BaseAlgorithm
 
-from .allo import ALLOAlgorithm
+from .allo import ALLO
 from .wrappers import HRLMetaEnv, LaplacianRewardWrapper
 
 
 def train_subpolicies(
     env_id: str,
-    allo: Union[ALLOAlgorithm, th.nn.Module],
+    allo: Union[ALLO, th.nn.Module],
     num_eigenvectors: int,
     total_timesteps: int = 100_000,
     save_dir: Union[str, Path] = "subpolicies",
@@ -30,7 +30,7 @@ def train_subpolicies(
     ----------
     env_id : str
         Gymnasium environment id used for subpolicy training.
-    allo : ALLOAlgorithm | torch.nn.Module
+    allo : ALLO | torch.nn.Module
         Trained ALLO encoder or compatible feature model.
     num_eigenvectors : int
         Number of option policies to train.

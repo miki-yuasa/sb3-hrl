@@ -42,9 +42,9 @@ Where:
 
 # Implementation Instructions
 
-## Step 1: The ALLO Feature Extractor (`ALLOAlgorithm`)
+## Step 1: The ALLO Feature Extractor (`ALLO`)
 
-Create a class `ALLOAlgorithm` that inherits from `stable_baselines3.common.base_class.BaseAlgorithm`.
+Create a class `ALLO` that inherits from `stable_baselines3.common.base_class.BaseAlgorithm`.
 
 ### A. Architecture & Initialization
 
@@ -123,7 +123,7 @@ Inside a `with torch.no_grad():` block, update the dual variables via gradient a
 
 Create a standard `gymnasium.RewardWrapper` (or `gymnasium.Wrapper`).
 
-* **Initialization:** Takes the trained `ALLOAlgorithm` network and a target `eigenvector_index` $z \in \{0 \dots d-1\}$.
+* **Initialization:** Takes the trained `ALLO` network and a target `eigenvector_index` $z \in \{0 \dots d-1\}$.
 
 * **Reward Logic:** `reward = phi(s_next)[z] - phi(s_current)[z]`. (This encourages the agent to transition to states that maximize the value of the $z$-th eigenvector, effectively discovering a bottleneck or specific room/region).
 

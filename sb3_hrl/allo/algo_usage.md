@@ -1,14 +1,14 @@
 # ALLO Usage
 
-This guide shows a practical workflow for using `ALLOAlgorithm` to learn a Laplacian representation, train subpolicies with intrinsic rewards, and train a high-level meta-policy.
+This guide shows a practical workflow for using `ALLO` to learn a Laplacian representation, train subpolicies with intrinsic rewards, and train a high-level meta-policy.
 
 ## 1. Pretrain ALLO Representation
 
 ```python
-from sb3_hrl.allo import ALLOAlgorithm
+from sb3_hrl.allo import ALLO
 
 # Use any Gymnasium env id or an instantiated env
-allo = ALLOAlgorithm(
+allo = ALLO(
     env="Pendulum-v1",
     representation_dim=8,
     learning_rate=3e-4,
@@ -75,7 +75,7 @@ meta.learn(total_timesteps=200_000)
 
 ## Notes
 
-- `ALLOAlgorithm` currently expects flattenable Box observations.
+- `ALLO` currently expects flattenable Box observations.
 - Dict observations are not supported by the current implementation.
 - For continuous action spaces, `train_subpolicies(..., algorithm="auto")` uses SAC.
 - For discrete action spaces, `train_subpolicies(..., algorithm="auto")` uses PPO.

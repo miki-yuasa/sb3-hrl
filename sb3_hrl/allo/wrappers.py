@@ -11,7 +11,7 @@ from gymnasium import spaces
 from gymnasium.spaces import utils as space_utils
 from stable_baselines3.common.base_class import BaseAlgorithm
 
-from .allo import ALLOAlgorithm
+from .allo import ALLO
 
 
 class LaplacianRewardWrapper(gym.Wrapper):
@@ -21,7 +21,7 @@ class LaplacianRewardWrapper(gym.Wrapper):
     ----------
     env : gym.Env
         Wrapped base environment.
-    allo : ALLOAlgorithm | torch.nn.Module
+    allo : ALLO | torch.nn.Module
         ALLO encoder or compatible feature model.
     eigenvector_index : int
         Index of target Laplacian coordinate.
@@ -32,7 +32,7 @@ class LaplacianRewardWrapper(gym.Wrapper):
     def __init__(
         self,
         env: gym.Env,
-        allo: Union[ALLOAlgorithm, th.nn.Module],
+        allo: Union[ALLO, th.nn.Module],
         eigenvector_index: int,
         device: Union[str, th.device] = "cpu",
     ) -> None:
@@ -61,7 +61,7 @@ class LaplacianRewardWrapper(gym.Wrapper):
         flat = space_utils.flatten(self.observation_space, observation)
         flat = np.asarray(flat, dtype=np.float32).reshape(1, -1)
         with th.no_grad():
-            if isinstance(self.allo, ALLOAlgorithm):
+            if isinstance(self.allo, ALLO):
                 features = self.allo.encode(flat)
             else:
                 inputs = th.as_tensor(flat, dtype=th.float32, device=self.device)

@@ -1,7 +1,7 @@
 """Top-level package for SB3-HRL."""
 
 from sb3_hrl.allo import (
-    ALLOAlgorithm,
+    ALLO,
     HRLMetaEnv,
     LaplacianRewardWrapper,
     train_meta_policy,
@@ -13,7 +13,7 @@ __all__ = [
     "HIRO",
     "HIROReplayBuffer",
     "SubgoalProjectionWrapper",
-    "ALLOAlgorithm",
+    "ALLO",
     "LaplacianRewardWrapper",
     "HRLMetaEnv",
     "train_subpolicies",
