@@ -169,6 +169,7 @@ class ALLO(BaseAlgorithm):
         use_barrier_for_duals: bool = True,
         grad_clip_norm: float = 10.0,
         hidden_dims: tuple[int, ...] = (256, 256),
+        auto_collect_if_needed: bool = True,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
         verbose: int = 0,
@@ -215,6 +216,9 @@ class ALLO(BaseAlgorithm):
             Gradient clipping norm.
         hidden_dims : tuple[int, ...], default=(256, 256)
             Hidden MLP layer widths for feature network.
+        auto_collect_if_needed : bool, default=False
+            Whether ``learn()`` should automatically collect random transitions
+            to fill the replay buffer when it is not full.
         stats_window_size : int, default=100
             Window size for running statistics.
         tensorboard_log : str | None, default=None
@@ -265,6 +269,7 @@ class ALLO(BaseAlgorithm):
         self.use_barrier_for_duals = bool(use_barrier_for_duals)
         self.grad_clip_norm = float(grad_clip_norm)
         self.hidden_dims = hidden_dims
+        self.auto_collect_if_needed = bool(auto_collect_if_needed)
         self._flat_obs_space = space_utils.flatten_space(self.observation_space)
         if not isinstance(self._flat_obs_space, spaces.Box):
             raise TypeError("ALLO requires a flattenable Box observation space.")
@@ -722,10 +727,16 @@ class ALLO(BaseAlgorithm):
             raise ValueError("total_timesteps must be a positive integer.")
 
         if not self.replay_buffer.full:
-            raise RuntimeError(
-                "Replay buffer must be pre-filled before offline training. "
-                "Call `collect_random_transitions()` first."
-            )
+            if self.auto_collect_if_needed:
+                missing_steps = self.buffer_size - self.replay_buffer.size()
+                if missing_steps > 0:
+                    self._collect_random_transitions(missing_steps)
+            else:
+                raise RuntimeError(
+                    "Replay buffer must be pre-filled before offline training. "
+                    "Call `collect_random_transitions()` first or set "
+                    "`auto_collect_if_needed=True`."
+                )
 
         total_epochs = int(total_timesteps)
         callback_total_timesteps = total_epochs * self.n_envs
