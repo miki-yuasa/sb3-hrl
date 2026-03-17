@@ -120,7 +120,11 @@ class _ALLOPolicy(BasePolicy):
     requires ``self.policy`` to exist.
     """
 
-    def _predict(self, observation: Union[th.Tensor, dict[str, th.Tensor]], deterministic: bool = False) -> th.Tensor:
+    def _predict(
+        self,
+        observation: Union[th.Tensor, dict[str, th.Tensor]],
+        deterministic: bool = False,
+    ) -> th.Tensor:
         del deterministic
 
         if isinstance(observation, dict):
@@ -129,7 +133,9 @@ class _ALLOPolicy(BasePolicy):
         else:
             batch_size = int(observation.shape[0])
 
-        sampled_actions = np.array([self.action_space.sample() for _ in range(batch_size)])
+        sampled_actions = np.array(
+            [self.action_space.sample() for _ in range(batch_size)]
+        )
         return th.as_tensor(sampled_actions, device=self.device)
 
 
