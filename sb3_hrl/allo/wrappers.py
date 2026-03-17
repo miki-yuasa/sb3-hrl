@@ -15,7 +15,19 @@ from .allo import ALLOAlgorithm
 
 
 class LaplacianRewardWrapper(gym.Wrapper):
-    """Intrinsic reward wrapper based on Laplacian feature progress."""
+    """Intrinsic reward wrapper based on Laplacian feature progress.
+
+    Parameters
+    ----------
+    env : gym.Env
+        Wrapped base environment.
+    allo : ALLOAlgorithm | torch.nn.Module
+        ALLO encoder or compatible feature model.
+    eigenvector_index : int
+        Index of target Laplacian coordinate.
+    device : str | torch.device, default="cpu"
+        Device used when `allo` is a raw torch module.
+    """
 
     def __init__(
         self,
@@ -34,7 +46,18 @@ class LaplacianRewardWrapper(gym.Wrapper):
             raise ValueError("eigenvector_index must be non-negative.")
 
     def _encode(self, observation: np.ndarray) -> th.Tensor:
-        """Encode a single observation into a feature vector."""
+        """Encode a single observation into a feature vector.
+
+        Parameters
+        ----------
+        observation : np.ndarray
+            Environment observation with shape ``[*obs_shape]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded feature vector with shape ``[representation_dim]``.
+        """
         flat = space_utils.flatten(self.observation_space, observation)
         flat = np.asarray(flat, dtype=np.float32).reshape(1, -1)
         with th.no_grad():
@@ -46,13 +69,36 @@ class LaplacianRewardWrapper(gym.Wrapper):
             return features[0]
 
     def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
-        """Reset wrapped environment and internal previous state."""
+        """Reset wrapped environment and internal previous state.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Keyword arguments forwarded to ``env.reset``.
+
+        Returns
+        -------
+        tuple[np.ndarray, dict[str, Any]]
+            Initial observation and reset info.
+        """
         obs, info = self.env.reset(**kwargs)
         self._prev_obs = np.asarray(obs)
         return obs, info
 
     def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        """Step wrapped env and replace reward with intrinsic feature progress."""
+        """Step wrapped env and replace reward with intrinsic feature progress.
+
+        Parameters
+        ----------
+        action : Any
+            Environment action sampled by the agent.
+
+        Returns
+        -------
+        tuple[np.ndarray, float, bool, bool, dict[str, Any]]
+            Next observation, intrinsic reward, terminal flag, truncation flag,
+            and environment info.
+        """
         if self._prev_obs is None:
             raise RuntimeError("Call reset() before step() in LaplacianRewardWrapper.")
 
@@ -73,7 +119,17 @@ class LaplacianRewardWrapper(gym.Wrapper):
 
 
 class HRLMetaEnv(gym.Env[np.ndarray, int]):
-    """Hierarchical environment where actions select option policies."""
+    """Hierarchical environment where actions select option policies.
+
+    Parameters
+    ----------
+    env : gym.Env
+        Base environment that provides extrinsic rewards.
+    subpolicies : list[BaseAlgorithm]
+        Pretrained low-level option policies.
+    option_horizon : int, default=10
+        Number of low-level steps executed per high-level action.
+    """
 
     metadata = {"render_modes": []}
 
@@ -98,13 +154,36 @@ class HRLMetaEnv(gym.Env[np.ndarray, int]):
         self._last_obs: Optional[np.ndarray] = None
 
     def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
-        """Reset base environment."""
+        """Reset base environment.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Keyword arguments forwarded to ``env.reset``.
+
+        Returns
+        -------
+        tuple[np.ndarray, dict[str, Any]]
+            Initial observation and reset info.
+        """
         obs, info = self.env.reset(**kwargs)
         self._last_obs = np.asarray(obs)
         return obs, info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        """Execute selected option for option_horizon low-level steps."""
+        """Execute selected option for option_horizon low-level steps.
+
+        Parameters
+        ----------
+        action : int
+            Index of selected low-level option.
+
+        Returns
+        -------
+        tuple[np.ndarray, float, bool, bool, dict[str, Any]]
+            Final observation, accumulated extrinsic reward, terminal flag,
+            truncation flag, and info dictionary.
+        """
         if self._last_obs is None:
             raise RuntimeError("Call reset() before step() in HRLMetaEnv.")
         if not self.action_space.contains(action):
@@ -130,11 +209,33 @@ class HRLMetaEnv(gym.Env[np.ndarray, int]):
         return obs, total_reward, terminated, truncated, info
 
     def render(self):
-        """Delegate rendering to wrapped env."""
+        """Delegate rendering to wrapped env.
+
+        Parameters
+        ----------
+        None
+            Uses current wrapped environment state.
+
+        Returns
+        -------
+        Any
+            Render output from wrapped environment.
+        """
         return self.env.render()
 
     def close(self) -> None:
-        """Close wrapped env resources."""
+        """Close wrapped env resources.
+
+        Parameters
+        ----------
+        None
+            Method has no external parameters.
+
+        Returns
+        -------
+        None
+            Releases wrapped environment resources.
+        """
         self.env.close()
 
 

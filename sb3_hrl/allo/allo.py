@@ -1,4 +1,58 @@
-"""ALLO representation learning algorithm implementation."""
+"""Augmented Lagrangian Laplacian Objective (ALLO) representation learner.
+
+This module implements the ALLO pretraining component used for hierarchical
+reinforcement learning (HRL) option discovery.
+
+Algorithm context
+-----------------
+The objective is to learn Laplacian coordinates of an MDP state space so that
+temporally-extended actions (options) can be discovered and optimized. In
+practice, the learned coordinates are later used to define intrinsic rewards for
+low-level policies, while a high-level controller selects among those
+subpolicies.
+
+Compared with graph-drawing style formulations that can converge to arbitrary
+rotations of eigenvectors, ALLO introduces an augmented Lagrangian max-min
+objective with stop-gradient operators to break rotational symmetry in the
+optimization dynamics.
+
+Mathematical objective
+----------------------
+ALLO optimizes the following saddle objective:
+
+max_beta min_u
+     sum_i <u_i, L u_i>
+     + sum_j sum_{k<=j} beta_{jk} ( <u_j, [u_k]> - delta_{jk} )
+     + b * sum_j sum_{k<=j} ( <u_j, [u_k]> - delta_{jk} )^2
+
+where:
+
+- u are neural-network features (dimension d), approximating Laplacian modes.
+- L is the graph Laplacian induced by environment transitions.
+- beta is a lower-triangular matrix of dual variables.
+- [u_k] denotes stop-gradient (implemented via ``detach()``).
+- b is a barrier coefficient that is increased during training.
+- delta_{jk} is the Kronecker delta.
+
+Implementation details in this module
+-------------------------------------
+This implementation follows the ALLO pretrainer stage:
+
+1. Collect transitions into an SB3 ``ReplayBuffer`` using random actions.
+2. Sample discounted temporal state pairs from a truncated geometric lag
+    distribution and minimize temporal smoothness:
+    ``graph_loss = mean((phi(s1) - phi(s2))^2, batch).sum(features)``.
+3. Sample two independent uncorrelated state batches, compute detached
+    inner-product constraints, and form:
+    - dual loss using current dual variables,
+    - barrier loss using element-wise quadratic constraint errors.
+4. Update network parameters with gradient descent, then update dual variables
+    and barrier coefficients in a no-grad block using clamped ascent dynamics
+    and momentum.
+
+Intrinsic reward wrappers, subpolicy training helpers, and hierarchical
+meta-environment logic are implemented in sibling modules.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +68,17 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 
 
 class _LaplacianFeatureNet(th.nn.Module):
-    """Neural feature extractor used by :class:`ALLOAlgorithm`."""
+    """Neural feature extractor used by :class:`ALLOAlgorithm`.
+
+    Parameters
+    ----------
+    input_dim : int
+        Flattened observation dimension.
+    feature_dim : int
+        Output Laplacian feature dimension.
+    hidden_dims : tuple[int, ...], default=(256, 256)
+        Hidden MLP layer widths.
+    """
 
     def __init__(
         self,
@@ -83,6 +147,60 @@ class ALLOAlgorithm(BaseAlgorithm):
         device: Union[str, th.device] = "auto",
         verbose: int = 0,
     ) -> None:
+        """Initialize ALLO pretrainer.
+
+        Parameters
+        ----------
+        env : GymEnv | str
+            Environment instance or Gymnasium environment id.
+        representation_dim : int
+            Number of Laplacian coordinates to learn.
+        learning_rate : float, default=3e-4
+            Optimizer learning rate for the feature network.
+        buffer_size : int, default=100_000
+            Replay buffer capacity.
+        batch_size : int, default=256
+            Mini-batch size for ALLO objective updates.
+        train_freq : int, default=256
+            Number of collection steps between update phases.
+        gradient_steps : int, default=1
+            Number of optimization steps per update phase.
+        gamma_pairs : float, default=0.95
+            Geometric factor for discounted temporal pair sampling.
+        pair_horizon : int, default=20
+            Maximum temporal offset when sampling state pairs.
+        lr_duals : float, default=5e-3
+            Learning rate for dual-variable ascent updates.
+        dual_momentum : float, default=0.9
+            Momentum factor used for dual updates.
+        dual_min : float, default=0.0
+            Minimum clamp value for dual variables.
+        dual_max : float, default=100.0
+            Maximum clamp value for dual variables.
+        lr_barrier_coeff : float, default=1e-3
+            Learning rate for barrier coefficient updates.
+        barrier_min : float, default=1.0
+            Minimum clamp value for barrier coefficients.
+        barrier_max : float, default=100.0
+            Maximum clamp value for barrier coefficients.
+        use_barrier_for_duals : bool, default=True
+            Whether dual learning rate scales with barrier value.
+        grad_clip_norm : float, default=10.0
+            Gradient clipping norm.
+        hidden_dims : tuple[int, ...], default=(256, 256)
+            Hidden MLP layer widths for feature network.
+        seed : int | None, default=None
+            Random seed.
+        device : str | torch.device, default="auto"
+            Torch device for model and tensors.
+        verbose : int, default=0
+            SB3 verbosity level.
+
+        Returns
+        -------
+        None
+            Initializes the algorithm in place.
+        """
         super().__init__(
             policy="MlpPolicy",
             env=env,
@@ -145,7 +263,18 @@ class ALLOAlgorithm(BaseAlgorithm):
         self._setup_model()
 
     def _setup_model(self) -> None:
-        """Create replay buffer, feature network, and ALLO state tensors."""
+        """Create replay buffer, feature network, and ALLO state tensors.
+
+        Parameters
+        ----------
+        None
+            Uses instance attributes set at initialization.
+
+        Returns
+        -------
+        None
+            Allocates internal model, optimizer, and constrained variables.
+        """
         self.replay_buffer = ReplayBuffer(
             buffer_size=self.buffer_size,
             observation_space=self.observation_space,
@@ -169,11 +298,33 @@ class ALLOAlgorithm(BaseAlgorithm):
         self.barrier_coeffs = th.ones(shape, dtype=th.float32, device=self.device)
 
     def _excluded_save_params(self) -> list[str]:
-        """Exclude raw env handle from pickled data."""
+        """Exclude raw env handle from pickled data.
+
+        Parameters
+        ----------
+        None
+            Method has no external parameters.
+
+        Returns
+        -------
+        list[str]
+            Attribute names excluded from standard SB3 pickling.
+        """
         return [*super()._excluded_save_params(), "env"]
 
     def _get_torch_save_params(self) -> tuple[list[str], list[str]]:
-        """Return torch state objects used by SB3 save/load."""
+        """Return torch state objects used by SB3 save/load.
+
+        Parameters
+        ----------
+        None
+            Method has no external parameters.
+
+        Returns
+        -------
+        tuple[list[str], list[str]]
+            Tuple of state-dict names and tensor attribute names.
+        """
         state_dicts = ["feature_net", "optimizer"]
         tensors = ["dual_variables", "dual_velocities", "barrier_coeffs"]
         return state_dicts, tensors
@@ -195,7 +346,19 @@ class ALLOAlgorithm(BaseAlgorithm):
         return observations.reshape(batch_size, -1).astype(np.float32, copy=False)
 
     def encode(self, observations: Union[np.ndarray, th.Tensor]) -> th.Tensor:
-        """Encode observations into Laplacian features."""
+        """Encode observations into Laplacian features.
+
+        Parameters
+        ----------
+        observations : np.ndarray | torch.Tensor
+            Single observation of shape ``[*obs_shape]`` or batch of shape
+            ``[batch_size, *obs_shape]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded features with shape ``[batch_size, representation_dim]``.
+        """
         if isinstance(observations, np.ndarray):
             obs_np = observations
             if obs_np.ndim == self._obs_ndim:
@@ -210,7 +373,18 @@ class ALLOAlgorithm(BaseAlgorithm):
         return self.feature_net(obs_tensor)
 
     def _sample_uniform_states(self, batch_size: int) -> np.ndarray:
-        """Sample uncorrelated states from replay buffer."""
+        """Sample uncorrelated states from replay buffer.
+
+        Parameters
+        ----------
+        batch_size : int
+            Number of observations to sample.
+
+        Returns
+        -------
+        np.ndarray
+            Observation batch of shape ``[batch_size, *obs_shape]``.
+        """
         current_size = self.replay_buffer.size()
         indices = np.random.randint(0, current_size, size=batch_size)
         env_indices = np.random.randint(0, self.n_envs, size=batch_size)
@@ -219,7 +393,18 @@ class ALLOAlgorithm(BaseAlgorithm):
     def _sample_discounted_pairs(
         self, batch_size: int
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample temporally-correlated state pairs using truncated geometric lags."""
+        """Sample temporally-correlated state pairs using truncated geometric lags.
+
+        Parameters
+        ----------
+        batch_size : int
+            Number of paired samples.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Pair ``(s_1, s_2)`` each with shape ``[batch_size, *obs_shape]``.
+        """
         current_size = self.replay_buffer.size()
         if current_size < 2:
             raise RuntimeError("Replay buffer does not contain enough transitions.")
@@ -242,7 +427,18 @@ class ALLOAlgorithm(BaseAlgorithm):
         return first, second
 
     def _collect_random_transitions(self, n_steps: int) -> None:
-        """Collect transitions with a random behavior policy."""
+        """Collect transitions with a random behavior policy.
+
+        Parameters
+        ----------
+        n_steps : int
+            Number of vectorized environment steps to collect.
+
+        Returns
+        -------
+        None
+            Appends sampled transitions to the replay buffer.
+        """
         if self.env is None:
             raise RuntimeError("ALLOAlgorithm environment is not initialized.")
         if self._allo_last_obs is None:
@@ -275,7 +471,18 @@ class ALLOAlgorithm(BaseAlgorithm):
             self.num_timesteps += self.n_envs
 
     def train_step(self) -> dict[str, float]:
-        """Run one ALLO optimization step."""
+        """Run one ALLO optimization step.
+
+        Parameters
+        ----------
+        None
+            Uses replay-buffer samples and model state.
+
+        Returns
+        -------
+        dict[str, float]
+            Scalar diagnostics and loss components for logging.
+        """
         if self.replay_buffer.size() < max(self.batch_size, self.pair_horizon + 1):
             raise RuntimeError("Not enough replay data to run ALLO training step.")
 
@@ -379,7 +586,28 @@ class ALLOAlgorithm(BaseAlgorithm):
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
     ) -> "ALLOAlgorithm":
-        """Train ALLO representation network."""
+        """Train ALLO representation network.
+
+        Parameters
+        ----------
+        total_timesteps : int
+            Total number of environment steps to collect.
+        callback : MaybeCallback, default=None
+            Optional SB3 callback.
+        log_interval : int, default=10
+            Logger dump interval in outer-loop iterations.
+        tb_log_name : str, default="ALLO"
+            TensorBoard run label.
+        reset_num_timesteps : bool, default=True
+            Whether to reset timestep counter before training.
+        progress_bar : bool, default=False
+            Whether to show a progress bar.
+
+        Returns
+        -------
+        ALLOAlgorithm
+            Trained algorithm instance.
+        """
         total_timesteps, callback = self._setup_learn(
             total_timesteps=total_timesteps,
             callback=callback,

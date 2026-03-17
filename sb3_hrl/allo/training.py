@@ -24,7 +24,30 @@ def train_subpolicies(
     algorithm: str = "auto",
     device: Union[str, th.device] = "auto",
 ) -> list[Path]:
-    """Train one low-level subpolicy per Laplacian eigenvector."""
+    """Train one low-level subpolicy per Laplacian eigenvector.
+
+    Parameters
+    ----------
+    env_id : str
+        Gymnasium environment id used for subpolicy training.
+    allo : ALLOAlgorithm | torch.nn.Module
+        Trained ALLO encoder or compatible feature model.
+    num_eigenvectors : int
+        Number of option policies to train.
+    total_timesteps : int, default=100_000
+        Timesteps per option policy.
+    save_dir : str | pathlib.Path, default="subpolicies"
+        Directory where option checkpoints are saved.
+    algorithm : str, default="auto"
+        Training algorithm selector: "auto", "ppo", or "sac".
+    device : str | torch.device, default="auto"
+        Device passed to SB3 algorithms.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Saved checkpoint paths for all trained options.
+    """
     if num_eigenvectors <= 0:
         raise ValueError("num_eigenvectors must be positive.")
 
@@ -61,7 +84,20 @@ def train_subpolicies(
 
 
 def _load_single_subpolicy(path: Union[str, Path], env: gym.Env) -> BaseAlgorithm:
-    """Load a single subpolicy checkpoint with fallback across common SB3 classes."""
+    """Load a single subpolicy checkpoint with fallback across common SB3 classes.
+
+    Parameters
+    ----------
+    path : str | pathlib.Path
+        Path to subpolicy checkpoint.
+    env : gym.Env
+        Environment bound to the loaded model.
+
+    Returns
+    -------
+    stable_baselines3.common.base_class.BaseAlgorithm
+        Loaded SB3 policy instance.
+    """
     path_str = str(path)
     errors: list[str] = []
     for cls in (PPO, SAC, TD3, DQN):
@@ -80,7 +116,26 @@ def train_meta_policy(
     total_timesteps: int = 100_000,
     device: Union[str, th.device] = "auto",
 ) -> PPO:
-    """Train high-level PPO policy on HRLMetaEnv."""
+    """Train high-level PPO policy on HRLMetaEnv.
+
+    Parameters
+    ----------
+    env_id : str
+        Gymnasium environment id used for high-level training.
+    subpolicy_paths : list[str | pathlib.Path]
+        Paths to pretrained low-level option checkpoints.
+    option_horizon : int, default=10
+        Number of low-level steps per high-level decision.
+    total_timesteps : int, default=100_000
+        Total training timesteps for the high-level PPO policy.
+    device : str | torch.device, default="auto"
+        Device passed to PPO.
+
+    Returns
+    -------
+    stable_baselines3.PPO
+        Trained high-level PPO model.
+    """
     if len(subpolicy_paths) == 0:
         raise ValueError("subpolicy_paths must contain at least one checkpoint path.")
 
