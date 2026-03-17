@@ -587,7 +587,9 @@ class ALLO(BaseAlgorithm):
         collected_steps = 0
 
         while collected_steps < steps_to_collect:
-            step_chunk = min(progress_interval_steps, steps_to_collect - collected_steps)
+            step_chunk = min(
+                progress_interval_steps, steps_to_collect - collected_steps
+            )
             self._collect_random_transitions(step_chunk)
             collected_steps += step_chunk
 
@@ -595,7 +597,9 @@ class ALLO(BaseAlgorithm):
             if hasattr(self, "_logger"):
                 self.logger.record("collect/progress_steps", float(collected_steps))
                 self.logger.record("collect/progress_ratio", progress_ratio)
-                self.logger.record("collect/replay_size", float(self.replay_buffer.size()))
+                self.logger.record(
+                    "collect/replay_size", float(self.replay_buffer.size())
+                )
                 self.logger.dump(step=self.replay_buffer.size())
             elif self.verbose >= 1:
                 print(
