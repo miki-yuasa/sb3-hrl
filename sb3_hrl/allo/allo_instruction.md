@@ -4,13 +4,13 @@ You are an Expert Reinforcement Learning Engineer specializing in PyTorch and St
 
 The goal is to learn the Laplacian representation of an MDP's state space to discover temporally-extended actions (options). Previous methods like the Generalized Graph Drawing Objective (GGDO) suffer from severe hyperparameter sensitivity and converge to arbitrary rotations of eigenvectors. ALLO solves this using a max-min objective augmented with stop-gradient operators. This breaks the symmetry of eigenvector rotations, making the true eigenvectors and eigenvalues the unique stable equilibrium under gradient ascent-descent dynamics.
 
-Your implementation must act as a feature extractor/representation learner that can ingest transitions from an SB3 `ReplayBuffer`, which will then be used to train hierarchical options.
+Your implementation must act as an offline feature extractor/representation learner that first ingests a massive dataset of transitions into an SB3 `ReplayBuffer`, and then optimizes the representations, which will subsequently be used to train hierarchical options.
 
 # High-Level Architecture
 
 You will implement a 4-step HRL pipeline:
 
-1. **ALLO Pretrainer (SB3 Algorithm):** A custom SB3 `BaseAlgorithm` that collects transitions and trains a neural network to approximate the graph Laplacian eigenvectors using the ALLO max-min objective.
+1. **ALLO Offline Pretrainer:** A pre-training module that first collects a large dataset of transitions using a random policy, and then trains a neural network offline to approximate the graph Laplacian eigenvectors using the ALLO max-min objective.
 
 2. **Intrinsic Reward Wrapper:** A Gym `RewardWrapper` that uses the trained ALLO network to generate intrinsic rewards based on moving along specific inferred eigenvectors.
 
@@ -44,11 +44,11 @@ Where:
 
 ## Step 1: The ALLO Feature Extractor (`ALLO`)
 
-Create a class `ALLO` that inherits from `stable_baselines3.common.base_class.BaseAlgorithm`.
+Create a class `ALLO` that inherits from `stable_baselines3.common.base_class.BaseAlgorithm`. While it uses SB3 components, it should be designed for an **Offline Collect-Then-Train** workflow.
 
 ### A. Architecture & Initialization
 
-* **Buffer:** Use an SB3 `ReplayBuffer` to collect transitions using a random or exploratory policy.
+* **Buffer:** Use an SB3 `ReplayBuffer`. You must provide a method `collect_random_transitions(env, num_steps)` to completely fill this buffer before any training begins.
 
 * **Network:** An SB3 `BaseFeaturesExtractor` or a standard MLP/CNN (depending on state shape) that outputs a feature vector of dimension $d$.
 
@@ -62,7 +62,7 @@ Create a class `ALLO` that inherits from `stable_baselines3.common.base_class.Ba
 
 ### B. Optimization & Update Rules
 
-Implement a `learn()` (or `train()`) method that performs the following steps iteratively:
+Implement the `learn(total_timesteps, ...)` method inherited from `BaseAlgorithm`. **Crucially, clarify that in this offline context, the `total_timesteps` argument should be treated as `epochs`.** The method should iterate over the pre-filled replay buffer for `total_timesteps` (epochs). Each iteration (epoch) should perform the following steps:
 
 **1. Graph Loss (Temporal Smoothness):**
 
@@ -74,7 +74,7 @@ Implement a `learn()` (or `train()`) method that performs the following steps it
 
 **2. Orthogonality & Barrier Loss:**
 
-* Sample two sets of uncorrelated states ($s_{\text{uncorr1}}$ and $s_{\text{uncorr2}}$) uniformly from the replay buffer.
+* Sample two sets of uncorrelated states ($s_{\text{uncorr1}}$ and $s_{\text{uncorr2}}$) uniformly from the completely filled replay buffer.
 
 * Compute features: $\phi_{\text{uncorr1}}$ and $\phi_{\text{uncorr2}}$.
 
@@ -165,7 +165,7 @@ Create a `gymnasium.Env` that wraps the original environment.
 
 1. Use `gymnasium` instead of the old `gym`.
 
-2. Ensure strict adherence to the Stable Baselines 3 class architectures (especially when subclassing `BaseAlgorithm`).
+2. Ensure strict adherence to the Stable Baselines 3 class architectures where applicable.
 
 3. Include comprehensive Numpy-style docstrings outlining the shapes of tensors (e.g., `[batch_size, state_dim]`).
 

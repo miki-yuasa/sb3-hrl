@@ -156,7 +156,6 @@ class ALLO(BaseAlgorithm):
         learning_rate: float = 3e-4,
         buffer_size: int = 100_000,
         batch_size: int = 256,
-        train_freq: int = 256,
         gradient_steps: int = 1,
         gamma_pairs: float = 0.95,
         pair_horizon: int = 20,
@@ -190,10 +189,8 @@ class ALLO(BaseAlgorithm):
             Replay buffer capacity.
         batch_size : int, default=256
             Mini-batch size for ALLO objective updates.
-        train_freq : int, default=256
-            Number of collection steps between update phases.
         gradient_steps : int, default=1
-            Number of optimization steps per update phase.
+            Number of optimization steps per epoch.
         gamma_pairs : float, default=0.95
             Geometric factor for discounted temporal pair sampling.
         pair_horizon : int, default=20
@@ -253,7 +250,6 @@ class ALLO(BaseAlgorithm):
         self.representation_dim = int(representation_dim)
         self.buffer_size = int(buffer_size)
         self.batch_size = int(batch_size)
-        self.train_freq = int(train_freq)
         self.gradient_steps = int(gradient_steps)
         self.gamma_pairs = float(gamma_pairs)
         self.pair_horizon = int(pair_horizon)
@@ -561,7 +557,26 @@ class ALLO(BaseAlgorithm):
             self._allo_last_obs = cast(
                 Union[np.ndarray, dict[str, np.ndarray]], new_obs
             )
-            self.num_timesteps += self.n_envs
+
+    def collect_random_transitions(self, num_steps: Optional[int] = None) -> None:
+        """Collect transitions into the replay buffer before offline training.
+
+        Parameters
+        ----------
+        num_steps : int | None, default=None
+            Number of vectorized environment steps to collect. When ``None``,
+            collects exactly ``buffer_size`` vectorized steps, which fills the
+            replay buffer once.
+
+        Returns
+        -------
+        None
+            Populates the replay buffer with random-policy transitions.
+        """
+        steps_to_collect = self.buffer_size if num_steps is None else int(num_steps)
+        if steps_to_collect <= 0:
+            raise ValueError("num_steps must be a positive integer.")
+        self._collect_random_transitions(steps_to_collect)
 
     def train_step(self) -> dict[str, float]:
         """Run one ALLO optimization step.
@@ -679,12 +694,14 @@ class ALLO(BaseAlgorithm):
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
     ) -> "ALLO":
-        """Train ALLO representation network.
+        """Train ALLO representation network offline.
 
         Parameters
         ----------
         total_timesteps : int
-            Total number of environment steps to collect.
+            Number of offline optimization epochs over the pre-filled replay
+            buffer. In this offline ALLO implementation, this argument is
+            interpreted as epochs (not environment interaction steps).
         callback : MaybeCallback, default=None
             Optional SB3 callback.
         log_interval : int, default=10
@@ -701,8 +718,20 @@ class ALLO(BaseAlgorithm):
         ALLO
             Trained algorithm instance.
         """
+        if total_timesteps <= 0:
+            raise ValueError("total_timesteps must be a positive integer.")
+
+        if not self.replay_buffer.full:
+            raise RuntimeError(
+                "Replay buffer must be pre-filled before offline training. "
+                "Call `collect_random_transitions()` first."
+            )
+
+        total_epochs = int(total_timesteps)
+        callback_total_timesteps = total_epochs * self.n_envs
+
         total_timesteps, callback = self._setup_learn(
-            total_timesteps=total_timesteps,
+            total_timesteps=callback_total_timesteps,
             callback=callback,
             reset_num_timesteps=reset_num_timesteps,
             tb_log_name=tb_log_name,
@@ -711,20 +740,18 @@ class ALLO(BaseAlgorithm):
 
         callback.on_training_start(locals(), globals())
 
-        iteration = 0
-        while self.num_timesteps < total_timesteps:
-            collect_steps = min(self.train_freq, total_timesteps - self.num_timesteps)
-            self._collect_random_transitions(collect_steps)
+        if self.replay_buffer.size() < max(self.batch_size, self.pair_horizon + 1):
+            raise RuntimeError("Not enough replay data to run ALLO training step.")
 
-            if self.replay_buffer.size() >= max(self.batch_size, self.pair_horizon + 1):
-                for _ in range(self.gradient_steps):
-                    stats = self.train_step()
-                    for key, value in stats.items():
-                        self.logger.record(key, value)
+        for iteration in range(1, total_epochs + 1):
+            for _ in range(self.gradient_steps):
+                stats = self.train_step()
+                for key, value in stats.items():
+                    self.logger.record(key, value)
 
+            self.num_timesteps += self.n_envs
             self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
-            iteration += 1
             if log_interval > 0 and iteration % log_interval == 0:
                 self.logger.record("time/iterations", iteration, exclude="tensorboard")
                 self.logger.dump(step=self.num_timesteps)
