@@ -143,9 +143,11 @@ class ALLO(BaseAlgorithm):
         use_barrier_for_duals: bool = True,
         grad_clip_norm: float = 10.0,
         hidden_dims: tuple[int, ...] = (256, 256),
-        seed: Optional[int] = None,
-        device: Union[str, th.device] = "auto",
+        stats_window_size: int = 100,
+        tensorboard_log: Optional[str] = None,
         verbose: int = 0,
+        device: Union[str, th.device] = "auto",
+        seed: Optional[int] = None,
     ) -> None:
         """Initialize ALLO pretrainer.
 
@@ -189,12 +191,16 @@ class ALLO(BaseAlgorithm):
             Gradient clipping norm.
         hidden_dims : tuple[int, ...], default=(256, 256)
             Hidden MLP layer widths for feature network.
+        stats_window_size : int, default=100
+            Window size for running statistics.
+        tensorboard_log : str | None, default=None
+            TensorBoard log directory.
+        verbose : int, default=0
+            SB3 verbosity level.
         seed : int | None, default=None
             Random seed.
         device : str | torch.device, default="auto"
             Torch device for model and tensors.
-        verbose : int, default=0
-            SB3 verbosity level.
 
         Returns
         -------
@@ -211,6 +217,8 @@ class ALLO(BaseAlgorithm):
             support_multi_env=True,
             monitor_wrapper=True,
             supported_action_spaces=(spaces.Box, spaces.Discrete, spaces.MultiDiscrete),
+            tensorboard_log=tensorboard_log,
+            stats_window_size=stats_window_size,
         )
         if representation_dim <= 0:
             raise ValueError("representation_dim must be positive.")
@@ -234,7 +242,6 @@ class ALLO(BaseAlgorithm):
         self.use_barrier_for_duals = bool(use_barrier_for_duals)
         self.grad_clip_norm = float(grad_clip_norm)
         self.hidden_dims = hidden_dims
-
         self._flat_obs_space = space_utils.flatten_space(self.observation_space)
         if not isinstance(self._flat_obs_space, spaces.Box):
             raise TypeError("ALLO requires a flattenable Box observation space.")
