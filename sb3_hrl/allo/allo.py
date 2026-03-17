@@ -64,6 +64,7 @@ from gymnasium import spaces
 from gymnasium.spaces import utils as space_utils
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 
 
@@ -110,6 +111,26 @@ class _LaplacianFeatureNet(th.nn.Module):
             Feature tensor of shape ``[batch_size, feature_dim]``.
         """
         return self.model(observations)
+
+
+class _ALLOPolicy(BasePolicy):
+    """Lightweight random policy used to satisfy SB3 BaseAlgorithm API.
+
+    ALLO does not optimize a control policy, but SB3's ``predict()`` method
+    requires ``self.policy`` to exist.
+    """
+
+    def _predict(self, observation: Union[th.Tensor, dict[str, th.Tensor]], deterministic: bool = False) -> th.Tensor:
+        del deterministic
+
+        if isinstance(observation, dict):
+            first_tensor = next(iter(observation.values()))
+            batch_size = int(first_tensor.shape[0])
+        else:
+            batch_size = int(observation.shape[0])
+
+        sampled_actions = np.array([self.action_space.sample() for _ in range(batch_size)])
+        return th.as_tensor(sampled_actions, device=self.device)
 
 
 class ALLO(BaseAlgorithm):
@@ -208,7 +229,7 @@ class ALLO(BaseAlgorithm):
             Initializes the algorithm in place.
         """
         super().__init__(
-            policy="MlpPolicy",
+            policy=_ALLOPolicy,
             env=env,
             learning_rate=learning_rate,
             verbose=verbose,
@@ -287,6 +308,13 @@ class ALLO(BaseAlgorithm):
             device=self.device,
             n_envs=self.n_envs,
         )
+
+        self._setup_lr_schedule()
+        self.policy = self.policy_class(
+            self.observation_space,
+            self.action_space,
+        )
+        self.policy = self.policy.to(self.device)
 
         self.feature_net = _LaplacianFeatureNet(
             input_dim=self._obs_dim,
