@@ -56,6 +56,7 @@ meta-environment logic are implemented in sibling modules.
 
 from __future__ import annotations
 
+import importlib
 from typing import Optional, Union, cast
 
 import numpy as np
@@ -563,7 +564,9 @@ class ALLO(BaseAlgorithm):
                 Union[np.ndarray, dict[str, np.ndarray]], new_obs
             )
 
-    def collect_random_transitions(self, num_steps: Optional[int] = None) -> None:
+    def collect_random_transitions(
+        self, num_steps: Optional[int] = None, progress_bar: bool = False
+    ) -> None:
         """Collect transitions into the replay buffer before offline training.
 
         Parameters
@@ -572,6 +575,8 @@ class ALLO(BaseAlgorithm):
             Number of vectorized environment steps to collect. When ``None``,
             collects exactly ``buffer_size`` vectorized steps, which fills the
             replay buffer once.
+        progress_bar : bool, default=False
+            Whether to show a tqdm progress bar while collecting transitions.
 
         Returns
         -------
@@ -585,29 +590,54 @@ class ALLO(BaseAlgorithm):
         size_before = self.replay_buffer.size()
         progress_interval_steps = max(steps_to_collect // 20, 1)
         collected_steps = 0
+        pbar = None
 
-        while collected_steps < steps_to_collect:
-            step_chunk = min(
-                progress_interval_steps, steps_to_collect - collected_steps
-            )
-            self._collect_random_transitions(step_chunk)
-            collected_steps += step_chunk
+        if progress_bar:
+            try:
+                tqdm_module = importlib.import_module("tqdm")
+                tqdm_fn = getattr(tqdm_module, "tqdm")
 
-            progress_ratio = float(collected_steps) / float(steps_to_collect)
-            if hasattr(self, "_logger"):
-                self.logger.record("collect/progress_steps", float(collected_steps))
-                self.logger.record("collect/progress_ratio", progress_ratio)
-                self.logger.record(
-                    "collect/replay_size", float(self.replay_buffer.size())
+                pbar = tqdm_fn(
+                    total=steps_to_collect,
+                    desc="ALLO sample collection",
+                    unit="vec-step",
+                    leave=False,
                 )
-                self.logger.dump(step=self.replay_buffer.size())
-            elif self.verbose >= 1:
-                print(
-                    "[ALLO] Collection progress: "
-                    f"{collected_steps}/{steps_to_collect} "
-                    f"({100.0 * progress_ratio:.1f}%), "
-                    f"replay_size={self.replay_buffer.size()}"
+            except ImportError:
+                if self.verbose >= 1:
+                    print(
+                        "[ALLO] tqdm is not installed. Falling back to logger/print progress."
+                    )
+                progress_bar = False
+
+        try:
+            while collected_steps < steps_to_collect:
+                step_chunk = min(
+                    progress_interval_steps, steps_to_collect - collected_steps
                 )
+                self._collect_random_transitions(step_chunk)
+                collected_steps += step_chunk
+                if pbar is not None:
+                    pbar.update(step_chunk)
+
+                progress_ratio = float(collected_steps) / float(steps_to_collect)
+                if hasattr(self, "_logger"):
+                    self.logger.record("collect/progress_steps", float(collected_steps))
+                    self.logger.record("collect/progress_ratio", progress_ratio)
+                    self.logger.record(
+                        "collect/replay_size", float(self.replay_buffer.size())
+                    )
+                    self.logger.dump(step=self.replay_buffer.size())
+                elif self.verbose >= 1:
+                    print(
+                        "[ALLO] Collection progress: "
+                        f"{collected_steps}/{steps_to_collect} "
+                        f"({100.0 * progress_ratio:.1f}%), "
+                        f"replay_size={self.replay_buffer.size()}"
+                    )
+        finally:
+            if pbar is not None:
+                pbar.close()
 
         size_after = self.replay_buffer.size()
 
@@ -777,7 +807,10 @@ class ALLO(BaseAlgorithm):
             if self.auto_collect_if_needed:
                 missing_steps = self.buffer_size - self.replay_buffer.size()
                 if missing_steps > 0:
-                    self.collect_random_transitions(num_steps=missing_steps)
+                    self.collect_random_transitions(
+                        num_steps=missing_steps,
+                        progress_bar=progress_bar,
+                    )
             else:
                 raise RuntimeError(
                     "Replay buffer must be pre-filled before offline training. "
