@@ -563,7 +563,6 @@ class ALLO(BaseAlgorithm):
                 pbar = tqdm_fn(
                     total=steps_to_collect,
                     desc="ALLO sample collection",
-                    unit="vec-step",
                     leave=False,
                 )
             except ImportError:
