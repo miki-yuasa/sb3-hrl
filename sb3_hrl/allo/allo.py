@@ -527,8 +527,10 @@ class ALLO(BaseAlgorithm):
         max_lag = int(np.max(lags))
 
         if self.replay_buffer.full:
-            first_indices = np.random.randint(0, self.buffer_size, size=batch_size)
-            second_indices = (first_indices + lags) % self.buffer_size
+            # SB3 ReplayBuffer stores per-env time slots on axis 0.
+            rb_capacity = int(self.replay_buffer.buffer_size)
+            first_indices = np.random.randint(0, rb_capacity, size=batch_size)
+            second_indices = (first_indices + lags) % rb_capacity
         else:
             usable = max(current_size - max_lag, 1)
             first_indices = np.random.randint(0, usable, size=batch_size)
@@ -562,7 +564,9 @@ class ALLO(BaseAlgorithm):
         if self.env is None:
             raise RuntimeError("ALLO environment is not initialized.")
 
-        steps_to_collect = self.buffer_size if num_steps is None else int(num_steps)
+        steps_to_collect = (
+            int(self.replay_buffer.buffer_size) if num_steps is None else int(num_steps)
+        )
         if steps_to_collect <= 0:
             raise ValueError("num_steps must be a positive integer.")
 
@@ -789,7 +793,9 @@ class ALLO(BaseAlgorithm):
 
         if not self.replay_buffer.full:
             if self.auto_collect_if_needed:
-                missing_steps = self.buffer_size - self.replay_buffer.size()
+                missing_steps = (
+                    int(self.replay_buffer.buffer_size) - self.replay_buffer.size()
+                )
                 if missing_steps > 0:
                     self.collect_random_transitions(
                         num_steps=missing_steps,
@@ -820,7 +826,7 @@ class ALLO(BaseAlgorithm):
             raise RuntimeError(
                 f"Not enough replay data to run ALLO training step. "
                 f"Replay buffer size: {self.replay_buffer.size()}, "
-                f"batch_size: {self.batch_size}, pair_horizon: {self.pair_horizon}.\n"
+                f"batch_size: {self.batch_size}, pair_horizon: {self.pair_horizon}."
                 "Needs at least max(batch_size, pair_horizon + 1) transitions in the replay buffer."
             )
 
