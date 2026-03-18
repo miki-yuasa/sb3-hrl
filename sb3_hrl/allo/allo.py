@@ -584,10 +584,11 @@ class ALLO(BaseAlgorithm):
             try:
                 tqdm_module = importlib.import_module("tqdm")
                 tqdm_fn = getattr(tqdm_module, "tqdm")
+                progress_total_samples = steps_to_collect * self.n_envs
                 pbar = tqdm_fn(
-                    total=steps_to_collect,
+                    total=progress_total_samples,
                     desc="ALLO sample collection",
-                    unit="steps",
+                    unit="samples",
                     leave=False,
                 )
             except ImportError:
@@ -625,18 +626,21 @@ class ALLO(BaseAlgorithm):
                 collected_steps += 1
 
                 if pbar is not None:
-                    pbar.update(1)
+                    pbar.update(self.n_envs)
                 elif (
                     self.verbose >= 1
                     and collected_steps % max(steps_to_collect // 20, 1) == 0
                 ):
                     # Log progress ~20 times during collection if not using tqdm
                     progress_ratio = float(collected_steps) / float(steps_to_collect)
+                    replay_slots = self.replay_buffer.size()
+                    replay_samples = replay_slots * self.n_envs
                     print(
                         "[ALLO] Collection progress: "
                         f"{collected_steps}/{steps_to_collect} "
                         f"({100.0 * progress_ratio:.1f}%), "
-                        f"replay_size={self.replay_buffer.size()}"
+                        f"replay_size={replay_samples} "
+                        f"(slots={replay_slots}, n_envs={self.n_envs})"
                     )
         finally:
             if pbar is not None:
@@ -645,11 +649,16 @@ class ALLO(BaseAlgorithm):
         size_after = self.replay_buffer.size()
 
         # Log collection stats when a logger is available; otherwise fall back to stdout.
-        collected_samples = max(size_after - size_before, 0)
+        collected_slots = max(size_after - size_before, 0)
+        replay_size_total = size_after * self.n_envs
+        collected_samples = collected_slots * self.n_envs
         if hasattr(self, "_logger"):
             self.logger.record("collect/requested_steps", float(steps_to_collect))
-            self.logger.record("collect/replay_size", float(size_after))
+            # Keep this key in total-transition units for easier interpretation.
+            self.logger.record("collect/replay_size", float(replay_size_total))
+            self.logger.record("collect/replay_slots", float(size_after))
             self.logger.record("collect/collected_samples", float(collected_samples))
+            self.logger.record("collect/collected_slots", float(collected_slots))
             self.logger.record(
                 "collect/replay_full", float(int(self.replay_buffer.full))
             )
@@ -809,7 +818,7 @@ class ALLO(BaseAlgorithm):
                 )
 
         total_epochs = int(total_timesteps)
-        callback_total_timesteps = total_epochs * self.n_envs
+        callback_total_timesteps = total_epochs
 
         total_timesteps, callback = self._setup_learn(
             total_timesteps=callback_total_timesteps,
@@ -836,7 +845,9 @@ class ALLO(BaseAlgorithm):
                 for key, value in stats.items():
                     self.logger.record(key, value)
 
-            self.num_timesteps += self.n_envs
+            # In offline ALLO, one outer iteration corresponds to one configured
+            # training timestep (epoch), independent of vec-env parallelism.
+            self.num_timesteps += 1
             self._update_current_progress_remaining(self.num_timesteps, total_timesteps)
 
             if log_interval > 0 and iteration % log_interval == 0:
