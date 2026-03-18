@@ -588,7 +588,8 @@ class ALLO(BaseAlgorithm):
             raise ValueError("num_steps must be a positive integer.")
 
         size_before = self.replay_buffer.size()
-        progress_interval_steps = max(steps_to_collect // 20, 1)
+        progress_interval_steps = max(steps_to_collect // 500, 1)
+        progress_interval_steps = min(progress_interval_steps, 512)
         collected_steps = 0
         pbar = None
 
