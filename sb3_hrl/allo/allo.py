@@ -816,7 +816,13 @@ class ALLO(BaseAlgorithm):
         callback.on_training_start(locals(), globals())
 
         if self.replay_buffer.size() < max(self.batch_size, self.pair_horizon + 1):
-            raise RuntimeError("Not enough replay data to run ALLO training step.")
+            # Show the values of replay_buffer.size(), batch_size and pair_horizon for debugging
+            raise RuntimeError(
+                f"Not enough replay data to run ALLO training step. "
+                f"Replay buffer size: {self.replay_buffer.size()}, "
+                f"batch_size: {self.batch_size}, pair_horizon: {self.pair_horizon}."
+                "Needs at least max(batch_size, pair_horizon + 1) transitions in the replay buffer."
+            )
 
         for iteration in range(1, total_epochs + 1):
             for _ in range(self.gradient_steps):
