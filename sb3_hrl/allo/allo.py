@@ -370,22 +370,6 @@ class ALLO(BaseAlgorithm):
         tensors = ["dual_variables", "dual_velocities", "barrier_coeffs"]
         return state_dicts, tensors
 
-    def _flatten_observations(self, observations: np.ndarray) -> np.ndarray:
-        """Flatten observations into ``[batch_size, obs_dim]``.
-
-        Parameters
-        ----------
-        observations : np.ndarray
-            Observation batch with shape ``[batch_size, *obs_shape]``.
-
-        Returns
-        -------
-        np.ndarray
-            Flattened float32 observations with shape ``[batch_size, obs_dim]``.
-        """
-        batch_size = observations.shape[0]
-        return observations.reshape(batch_size, -1).astype(np.float32, copy=False)
-
     def _flatten_single_observation(
         self, observation: Union[np.ndarray, dict[str, np.ndarray]]
     ) -> np.ndarray:
@@ -401,8 +385,43 @@ class ALLO(BaseAlgorithm):
         np.ndarray
             Flattened 1D observation of shape ``[obs_dim]``.
         """
-        flat = space_utils.flatten(self.observation_space, observation)
-        return np.asarray(flat, dtype=np.float32).reshape(-1)
+        if isinstance(observation, dict):
+            flat = space_utils.flatten(self.observation_space, observation)
+        else:
+            flat = observation.reshape(-1)
+        return np.asarray(flat, dtype=np.float32)
+
+    def _numpy_to_torch(
+        self, arrays: Union[np.ndarray, tuple[np.ndarray, ...]]
+    ) -> Union[th.Tensor, tuple[th.Tensor, ...]]:
+        """Convert numpy array(s) to torch tensor(s) on device.
+
+        Parameters
+        ----------
+        arrays : np.ndarray | tuple[np.ndarray, ...]
+            Numpy array or tuple of arrays to convert.
+
+        Returns
+        -------
+        torch.Tensor | tuple[torch.Tensor, ...]
+            Tensor(s) on self.device with dtype float32.
+        """
+        if isinstance(arrays, tuple):
+            return tuple(
+                th.as_tensor(arr, dtype=th.float32, device=self.device)
+                for arr in arrays
+            )
+        return th.as_tensor(arrays, dtype=th.float32, device=self.device)
+
+    def _get_barrier_coeff(self) -> float:
+        """Get the current barrier coefficient scalar value.
+
+        Returns
+        -------
+        float
+            Current barrier coefficient (from [0, 0] element).
+        """
+        return float(self.barrier_coeffs[0, 0].item())
 
     def _flatten_vec_observations(
         self, observations: Union[np.ndarray, dict[str, np.ndarray]]
@@ -436,9 +455,10 @@ class ALLO(BaseAlgorithm):
             return np.stack(flattened, axis=0)
 
         obs_array = np.asarray(observations)
+        batch_size = obs_array.shape[0] if obs_array.ndim > self._obs_ndim else 1
         if obs_array.ndim == self._obs_ndim:
-            return self._flatten_observations(obs_array[None, ...])
-        return self._flatten_observations(obs_array)
+            obs_array = obs_array[None, ...]
+        return obs_array.reshape(batch_size, -1).astype(np.float32, copy=False)
 
     def encode(
         self, observations: Union[np.ndarray, dict[str, np.ndarray], th.Tensor]
@@ -458,7 +478,7 @@ class ALLO(BaseAlgorithm):
         """
         if isinstance(observations, (np.ndarray, dict)):
             flat = self._flatten_vec_observations(observations)
-            obs_tensor = th.as_tensor(flat, dtype=th.float32, device=self.device)
+            obs_tensor = self._numpy_to_torch(flat)
         else:
             obs_tensor = observations.to(self.device)
             if obs_tensor.ndim == self._obs_ndim:
@@ -650,34 +670,26 @@ class ALLO(BaseAlgorithm):
         uncorr_1_np = self._sample_uniform_states(self.batch_size)
         uncorr_2_np = self._sample_uniform_states(self.batch_size)
 
-        states_1 = th.as_tensor(
-            self._flatten_observations(states_1_np),
-            dtype=th.float32,
-            device=self.device,
-        )
-        states_2 = th.as_tensor(
-            self._flatten_observations(states_2_np),
-            dtype=th.float32,
-            device=self.device,
-        )
-        uncorr_1 = th.as_tensor(
-            self._flatten_observations(uncorr_1_np),
-            dtype=th.float32,
-            device=self.device,
-        )
-        uncorr_2 = th.as_tensor(
-            self._flatten_observations(uncorr_2_np),
-            dtype=th.float32,
-            device=self.device,
+        # Convert all numpy arrays to tensors at once
+        states_1, states_2, uncorr_1, uncorr_2 = self._numpy_to_torch(
+            (
+                self._flatten_vec_observations(states_1_np),
+                self._flatten_vec_observations(states_2_np),
+                self._flatten_vec_observations(uncorr_1_np),
+                self._flatten_vec_observations(uncorr_2_np),
+            )
         )
 
+        # Compute features for graph loss (temporal smoothness)
         phi_1 = self.feature_net(states_1)
         phi_2 = self.feature_net(states_2)
         graph_loss = ((phi_1 - phi_2) ** 2).mean(dim=0).sum()
 
+        # Compute features for orthogonality constraints
         phi_unc_1 = self.feature_net(uncorr_1)
         phi_unc_2 = self.feature_net(uncorr_2)
 
+        # Compute constraint error matrices
         norm = float(self.batch_size)
         m1 = (phi_unc_1.T @ phi_unc_1.detach()) / norm
         m2 = (phi_unc_2.T @ phi_unc_2.detach()) / norm
@@ -688,19 +700,20 @@ class ALLO(BaseAlgorithm):
         e = 0.5 * (e1 + e2)
         e_quad = e1 * e2
 
+        # Compute dual and barrier losses
         dual_loss = (self.dual_variables.detach() * e).sum()
-        barrier_coeff_val = self.barrier_coeffs[0, 0].detach()
-        barrier_loss = (barrier_coeff_val * e_quad).sum()
-
+        barrier_loss = (self._get_barrier_coeff() * e_quad).sum()
         total_loss = graph_loss + dual_loss + barrier_loss
 
+        # Network update
         self.optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
         th.nn.utils.clip_grad_norm_(self.feature_net.parameters(), self.grad_clip_norm)
         self.optimizer.step()
 
+        # Update dual variables and barrier coefficients
         with th.no_grad():
-            barrier_scalar = float(self.barrier_coeffs[0, 0].item())
+            barrier_scalar = self._get_barrier_coeff()
             effective_lr = self.lr_duals * (
                 1.0 + float(self.use_barrier_for_duals) * (barrier_scalar - 1.0)
             )
@@ -733,7 +746,7 @@ class ALLO(BaseAlgorithm):
             "loss/graph": float(graph_loss.item()),
             "loss/dual": float(dual_loss.item()),
             "loss/barrier": float(barrier_loss.item()),
-            "diagnostics/barrier_coeff": float(self.barrier_coeffs[0, 0].item()),
+            "diagnostics/barrier_coeff": barrier_scalar,
             "diagnostics/mean_constraint": float(e.abs().mean().item()),
         }
 
