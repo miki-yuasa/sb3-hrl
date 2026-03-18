@@ -520,50 +520,6 @@ class ALLO(BaseAlgorithm):
         second = self.replay_buffer.next_observations[second_indices, env_indices]
         return first, second
 
-    def _collect_random_transitions(self, n_steps: int) -> None:
-        """Collect transitions with a random behavior policy.
-
-        Parameters
-        ----------
-        n_steps : int
-            Number of vectorized environment steps to collect.
-
-        Returns
-        -------
-        None
-            Appends sampled transitions to the replay buffer.
-        """
-        if self.env is None:
-            raise RuntimeError("ALLO environment is not initialized.")
-        if self._allo_last_obs is None:
-            reset_obs = self.env.reset()
-            self._allo_last_obs = cast(
-                Union[np.ndarray, dict[str, np.ndarray]], reset_obs
-            )
-
-        for _ in range(n_steps):
-            actions = np.array([self.action_space.sample() for _ in range(self.n_envs)])
-            new_obs, rewards, dones, infos = self.env.step(actions)
-            obs_batch = self._flatten_vec_observations(
-                cast(Union[np.ndarray, dict[str, np.ndarray]], self._allo_last_obs)
-            )
-            next_obs_batch = self._flatten_vec_observations(
-                cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
-            )
-
-            self.replay_buffer.add(
-                obs=obs_batch,
-                next_obs=next_obs_batch,
-                action=actions,
-                reward=rewards,
-                done=dones,
-                infos=infos,
-            )
-
-            self._allo_last_obs = cast(
-                Union[np.ndarray, dict[str, np.ndarray]], new_obs
-            )
-
     def collect_random_transitions(
         self, num_steps: Optional[int] = None, progress_bar: bool = False
     ) -> None:
@@ -583,9 +539,18 @@ class ALLO(BaseAlgorithm):
         None
             Populates the replay buffer with random-policy transitions.
         """
+        if self.env is None:
+            raise RuntimeError("ALLO environment is not initialized.")
+
         steps_to_collect = self.buffer_size if num_steps is None else int(num_steps)
         if steps_to_collect <= 0:
             raise ValueError("num_steps must be a positive integer.")
+
+        if self._allo_last_obs is None:
+            reset_obs = self.env.reset()
+            self._allo_last_obs = cast(
+                Union[np.ndarray, dict[str, np.ndarray]], reset_obs
+            )
 
         size_before = self.replay_buffer.size()
         progress_interval_steps = max(steps_to_collect // 500, 1)
@@ -597,7 +562,6 @@ class ALLO(BaseAlgorithm):
             try:
                 tqdm_module = importlib.import_module("tqdm")
                 tqdm_fn = getattr(tqdm_module, "tqdm")
-
                 pbar = tqdm_fn(
                     total=steps_to_collect,
                     desc="ALLO sample collection",
@@ -613,29 +577,49 @@ class ALLO(BaseAlgorithm):
 
         try:
             while collected_steps < steps_to_collect:
-                step_chunk = min(
-                    progress_interval_steps, steps_to_collect - collected_steps
+                actions = np.array(
+                    [self.action_space.sample() for _ in range(self.n_envs)]
                 )
-                self._collect_random_transitions(step_chunk)
-                collected_steps += step_chunk
-                if pbar is not None:
-                    pbar.update(step_chunk)
+                new_obs, rewards, dones, infos = self.env.step(actions)
+                obs_batch = self._flatten_vec_observations(
+                    cast(Union[np.ndarray, dict[str, np.ndarray]], self._allo_last_obs)
+                )
+                next_obs_batch = self._flatten_vec_observations(
+                    cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
+                )
 
-                progress_ratio = float(collected_steps) / float(steps_to_collect)
-                if hasattr(self, "_logger"):
-                    self.logger.record("collect/progress_steps", float(collected_steps))
-                    self.logger.record("collect/progress_ratio", progress_ratio)
-                    self.logger.record(
-                        "collect/replay_size", float(self.replay_buffer.size())
-                    )
-                    self.logger.dump(step=self.replay_buffer.size())
-                elif self.verbose >= 1:
-                    print(
-                        "[ALLO] Collection progress: "
-                        f"{collected_steps}/{steps_to_collect} "
-                        f"({100.0 * progress_ratio:.1f}%), "
-                        f"replay_size={self.replay_buffer.size()}"
-                    )
+                self.replay_buffer.add(
+                    obs=obs_batch,
+                    next_obs=next_obs_batch,
+                    action=actions,
+                    reward=rewards,
+                    done=dones,
+                    infos=infos,
+                )
+
+                self._allo_last_obs = cast(
+                    Union[np.ndarray, dict[str, np.ndarray]], new_obs
+                )
+                collected_steps += 1
+
+                if (
+                    collected_steps % progress_interval_steps == 0
+                    or collected_steps == steps_to_collect
+                ):
+                    if pbar is not None:
+                        pbar.update(progress_interval_steps)
+                    else:
+                        # Only log incremental progress if we're not using tqdm
+                        progress_ratio = float(collected_steps) / float(
+                            steps_to_collect
+                        )
+                        if self.verbose >= 1:
+                            print(
+                                "[ALLO] Collection progress: "
+                                f"{collected_steps}/{steps_to_collect} "
+                                f"({100.0 * progress_ratio:.1f}%), "
+                                f"replay_size={self.replay_buffer.size()}"
+                            )
         finally:
             if pbar is not None:
                 pbar.close()
@@ -652,14 +636,6 @@ class ALLO(BaseAlgorithm):
                 "collect/replay_full", float(int(self.replay_buffer.full))
             )
             self.logger.dump(step=size_after)
-        elif self.verbose >= 1:
-            print(
-                "[ALLO] Collected transitions: "
-                f"requested_steps={steps_to_collect}, "
-                f"replay_size={size_after}, "
-                f"added_samples={collected_samples}, "
-                f"replay_full={self.replay_buffer.full}"
-            )
 
     def train_step(self) -> dict[str, float]:
         """Run one ALLO optimization step.
