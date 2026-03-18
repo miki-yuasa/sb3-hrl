@@ -553,8 +553,6 @@ class ALLO(BaseAlgorithm):
             )
 
         size_before = self.replay_buffer.size()
-        progress_interval_steps = max(steps_to_collect // 500, 1)
-        progress_interval_steps = min(progress_interval_steps, 512)
         collected_steps = 0
         pbar = None
 
@@ -602,24 +600,20 @@ class ALLO(BaseAlgorithm):
                 )
                 collected_steps += 1
 
-                if (
-                    collected_steps % progress_interval_steps == 0
-                    or collected_steps == steps_to_collect
+                if pbar is not None:
+                    pbar.update(1)
+                elif (
+                    self.verbose >= 1
+                    and collected_steps % max(steps_to_collect // 20, 1) == 0
                 ):
-                    if pbar is not None:
-                        pbar.update(progress_interval_steps)
-                    else:
-                        # Only log incremental progress if we're not using tqdm
-                        progress_ratio = float(collected_steps) / float(
-                            steps_to_collect
-                        )
-                        if self.verbose >= 1:
-                            print(
-                                "[ALLO] Collection progress: "
-                                f"{collected_steps}/{steps_to_collect} "
-                                f"({100.0 * progress_ratio:.1f}%), "
-                                f"replay_size={self.replay_buffer.size()}"
-                            )
+                    # Log progress ~20 times during collection if not using tqdm
+                    progress_ratio = float(collected_steps) / float(steps_to_collect)
+                    print(
+                        "[ALLO] Collection progress: "
+                        f"{collected_steps}/{steps_to_collect} "
+                        f"({100.0 * progress_ratio:.1f}%), "
+                        f"replay_size={self.replay_buffer.size()}"
+                    )
         finally:
             if pbar is not None:
                 pbar.close()
