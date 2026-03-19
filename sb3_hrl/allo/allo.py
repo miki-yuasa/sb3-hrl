@@ -63,10 +63,18 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 from gymnasium.spaces import utils as space_utils
-from stable_baselines3.common.base_class import BaseAlgorithm
+from stable_baselines3.common.base_class import (
+    BaseAlgorithm,
+    BaseCallback,
+    CallbackList,
+    ConvertCallback,
+)
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
+from tqdm.rich import tqdm
+
+from .utils import ALLOProgressBarCallback
 
 
 class _LaplacianFeatureNet(th.nn.Module):
@@ -582,10 +590,8 @@ class ALLO(BaseAlgorithm):
 
         if progress_bar:
             try:
-                tqdm_module = importlib.import_module("tqdm")
-                tqdm_fn = getattr(tqdm_module, "tqdm")
                 progress_total_samples = steps_to_collect * self.n_envs
-                pbar = tqdm_fn(
+                pbar = tqdm(
                     total=progress_total_samples,
                     desc="ALLO sample collection",
                     unit="samples",
@@ -860,6 +866,31 @@ class ALLO(BaseAlgorithm):
 
         callback.on_training_end()
         return self
+
+    def _init_callback(
+        self,
+        callback: MaybeCallback,
+        progress_bar: bool = False,
+    ) -> BaseCallback:
+        """
+        :param callback: Callback(s) called at every step with state of the algorithm.
+        :param progress_bar: Display a progress bar using tqdm and rich.
+        :return: A hybrid callback calling `callback` and performing evaluation.
+        """
+        # Convert a list of callbacks into a callback
+        if isinstance(callback, list):
+            callback = CallbackList(callback)
+
+        # Convert functional callback to object
+        if not isinstance(callback, BaseCallback):
+            callback = ConvertCallback(callback)
+
+        # Add progress bar callback
+        if progress_bar:
+            callback = CallbackList([callback, ALLOProgressBarCallback()])
+
+        callback.init_callback(self)
+        return callback
 
 
 __all__ = ["ALLO"]

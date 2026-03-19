@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Hierarchical reinforcement learning algorithms implemented by leveraging Stable Baselines 3"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["stable-baselines3>=2.5.0"]
+dependencies = [
+    "stable-baselines3>=2.5.0",
+    "tqdm>=4.67.3",
+]
 license = { file = "LICENSE" }
 authors = [{ name = "Mikihisa Yuasa" }]
 keywords = ["reinforcement-learning", "stable-baselines3", "sac", "sql"]
