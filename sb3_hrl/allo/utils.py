@@ -28,7 +28,7 @@ class ALLOProgressBarCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         # Update progress bar, we do num_envs steps per call to `env.step()`
-        self.pbar.update(self.training_env.num_envs)
+        self.pbar.update(1)
         return True
 
     def _on_training_end(self) -> None:
