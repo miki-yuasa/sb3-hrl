@@ -173,6 +173,7 @@ class ALLO(BaseAlgorithm):
         dual_min: float = 0.0,
         dual_max: float = 100.0,
         lr_barrier_coeff: float = 1e-3,
+        barrier_init: float = 1.0,
         barrier_min: float = 1.0,
         barrier_max: float = 100.0,
         use_barrier_for_duals: bool = True,
@@ -215,6 +216,8 @@ class ALLO(BaseAlgorithm):
             Maximum clamp value for dual variables.
         lr_barrier_coeff : float, default=1e-3
             Learning rate for barrier coefficient updates.
+        barrier_init : float, default=1.0
+            Initial value for barrier coefficients.
         barrier_min : float, default=1.0
             Minimum clamp value for barrier coefficients.
         barrier_max : float, default=100.0
@@ -273,6 +276,7 @@ class ALLO(BaseAlgorithm):
         self.dual_max = float(dual_max)
 
         self.lr_barrier_coeff = float(lr_barrier_coeff)
+        self.barrier_int = float(barrier_init)
         self.barrier_min = float(barrier_min)
         self.barrier_max = float(barrier_max)
         self.use_barrier_for_duals = bool(use_barrier_for_duals)
@@ -344,7 +348,9 @@ class ALLO(BaseAlgorithm):
         shape = (self.representation_dim, self.representation_dim)
         self.dual_variables = th.zeros(shape, dtype=th.float32, device=self.device)
         self.dual_velocities = th.zeros(shape, dtype=th.float32, device=self.device)
-        self.barrier_coeffs = th.ones(shape, dtype=th.float32, device=self.device)
+        self.barrier_coeffs = (
+            th.ones(shape, dtype=th.float32, device=self.device) * self.barrier_int
+        )
 
     def _excluded_save_params(self) -> list[str]:
         """Exclude raw env handle from pickled data.
