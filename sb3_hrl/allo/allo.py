@@ -185,6 +185,7 @@ class ALLO(BaseAlgorithm):
         verbose: int = 0,
         device: Union[str, th.device] = "auto",
         seed: Optional[int] = None,
+        policy: Optional[BasePolicy] = None,
     ) -> None:
         """Initialize ALLO pretrainer.
 
@@ -241,6 +242,8 @@ class ALLO(BaseAlgorithm):
             Random seed.
         device : str | torch.device, default="auto"
             Torch device for model and tensors.
+        policy : BasePolicy | None, default=None
+            Ignored placeholder to satisfy SB3 API. ALLO uses a fixed random policy
 
         Returns
         -------
