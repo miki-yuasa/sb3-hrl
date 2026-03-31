@@ -90,36 +90,6 @@ class BaseOption(ABC, Generic[ObsType, ActType]):
         """
         return False
 
-    @abstractmethod
-    def intrinsic_reward(
-        self,
-        obs: ObsType,
-        action: ActType,
-        next_obs: ObsType,
-        external_reward: float,
-        done: bool,
-    ) -> float:
-        """Compute intrinsic reward used for option policy training.
-
-        Parameters
-        ----------
-        obs : ObsType
-            Current observation.
-        action : ActType
-            Primitive action taken by the option policy.
-        next_obs : ObsType
-            Next observation.
-        external_reward : float
-            Reward produced by the wrapped base environment.
-        done : bool
-            ``True`` when the base transition ends the episode.
-
-        Returns
-        -------
-        float
-            Intrinsic reward value.
-        """
-
     def reset_execution_state(self) -> None:
         """Reset internal option state before a new option invocation.
 
@@ -127,6 +97,8 @@ class BaseOption(ABC, Generic[ObsType, ActType]):
         -----
         Stateless options can keep the default implementation.
         """
+
+        pass
 
     def predict(self, obs: ObsType, deterministic: bool = True) -> ActType:
         """Query the attached policy for a primitive action.

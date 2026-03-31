@@ -277,18 +277,18 @@ class MetaControllerEnvWrapper(
             return current_obs, self.invalid_option_penalty, False, False, info
 
         option.reset_execution_state()
-        obs = current_obs
-        total_reward = 0.0
-        effective_gamma = 1.0
-        steps = 0
-        terminated = False
-        truncated = False
-        option_terminated = False
+        obs: SB3ObsType = current_obs
+        total_reward: float = 0.0
+        effective_gamma: float = 1.0
+        steps: int = 0
+        terminated: bool = False
+        truncated: bool = False
+        option_terminated: bool = False
         last_info: dict[str, Any] = {}
         primitive_transitions: list[dict[str, Any]] = []
 
         while True:
-            primitive_action = option.predict(obs)
+            primitive_action: ActType = option.predict(obs)
             next_obs, reward, terminated, truncated, step_info = self.env.step(
                 primitive_action
             )
@@ -314,8 +314,8 @@ class MetaControllerEnvWrapper(
 
             steps += 1
             option_terminated = bool(option.termination_condition(next_obs))
-            obs = np.asarray(next_obs)
-            last_info = dict(step_info)
+            obs: SB3ObsType = np.asarray(next_obs)
+            last_info: dict[str, Any] = dict(step_info)
 
             if terminated or truncated or option_terminated:
                 break
