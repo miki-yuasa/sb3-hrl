@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from collections.abc import Callable
+from typing import Any, Generic, Literal, Optional
 
 import gymnasium as gym
 import numpy as np
-from gymnasium import spaces
+from gymnasium import Wrapper, spaces
+from gymnasium.core import ActType, ObsType, WrapperObsType
 
-from .options import BaseOption, RandomOption
+from .options import BaseIntrinsicReward, BaseOption, RandomOption
 
 
-class SubpolicyTrainingWrapper(gym.Wrapper):
+class SubpolicyTrainingWrapper(
+    Wrapper[ObsType, ActType, ObsType, ActType],
+    Generic[ObsType, ActType],
+):
     """Wrap an environment to train one specific option subpolicy.
 
     This wrapper keeps the base environment dynamics unchanged but replaces
@@ -21,29 +26,50 @@ class SubpolicyTrainingWrapper(gym.Wrapper):
     ----------
     env : gym.Env
         Wrapped base environment.
-    option : BaseOption
-        Option being trained in phase 1.
+    intrinsic_reward : BaseIntrinsicReward[ObsType, ActType]
+        Intrinsic reward logic object used to compute phase-1 training reward.
+    termination_condition : callable | None, default=None
+        Optional termination predicate. If omitted and ``intrinsic_reward``
+        object defines ``termination_condition(obs) -> bool``, it is used.
+        Otherwise, option termination is disabled.
 
     Notes
     -----
     Typical SB3 usage:
 
-    ``model = PPO("MlpPolicy", SubpolicyTrainingWrapper(env, option), ...)``
+    ``wrapped = SubpolicyTrainingWrapper(env, intrinsic_reward=MyIntrinsicReward(), termination_condition=...)``
+    ``model = PPO("MlpPolicy", wrapped, ...)``
     """
 
-    def __init__(self, env: gym.Env, option: BaseOption) -> None:
+    def __init__(
+        self,
+        env: gym.Env,
+        intrinsic_reward_cls: type[BaseIntrinsicReward[ObsType, ActType]],
+        intrinsic_reward_args: dict[str, Any] | None = None,
+        termination_condition: Optional[Callable[[ObsType], bool]] = None,
+    ) -> None:
         super().__init__(env)
-        self.option = option
-        self._last_obs: Optional[np.ndarray] = None
+        self._last_obs: Optional[ObsType] = None
 
-    def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
+        self._intrinsic_reward: BaseIntrinsicReward[ObsType, ActType] = (
+            intrinsic_reward_cls(**(intrinsic_reward_args or {}))
+        )
+        self._termination_condition: Callable[[ObsType], bool] = (
+            termination_condition
+            if termination_condition is not None
+            else lambda _obs: False
+        )
+
+    def reset(self, **kwargs: Any) -> tuple[ObsType, dict[str, Any]]:
         """Reset wrapped env and option execution state."""
         obs, info = self.env.reset(**kwargs)
-        self._last_obs = np.asarray(obs)
-        self.option.reset_execution_state()
+        self._last_obs = obs
+        self._intrinsic_reward.reset_execution_state()
         return obs, info
 
-    def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: ActType
+    ) -> tuple[ObsType, float, bool, bool, dict[str, Any]]:
         """Forward primitive action and return option-specific intrinsic reward."""
         if self._last_obs is None:
             raise RuntimeError(
@@ -51,30 +77,31 @@ class SubpolicyTrainingWrapper(gym.Wrapper):
             )
 
         next_obs, external_reward, terminated, truncated, info = self.env.step(action)
-        done = bool(terminated or truncated)
         intrinsic = float(
-            self.option.intrinsic_reward(
+            self._intrinsic_reward.intrinsic_reward(
                 self._last_obs,
                 action,
                 next_obs,
                 float(external_reward),
-                done,
+                terminated or truncated,
             )
         )
 
-        option_terminated = bool(self.option.termination_condition(next_obs))
+        option_terminated = bool(self._termination_condition(next_obs))
         forced_terminated = bool(terminated or option_terminated)
 
-        info = dict(info)
         info["subpolicy_external_reward"] = float(external_reward)
         info["subpolicy_intrinsic_reward"] = intrinsic
         info["option_terminated"] = option_terminated
 
-        self._last_obs = np.asarray(next_obs)
-        return next_obs, intrinsic, forced_terminated, bool(truncated), info
+        self._last_obs = next_obs
+        return next_obs, intrinsic, forced_terminated, truncated, info
 
 
-class MetaControllerEnvWrapper(gym.Wrapper):
+class MetaControllerEnvWrapper(
+    Wrapper[WrapperObsType, int, ObsType, ActType],
+    Generic[WrapperObsType, ObsType, ActType],
+):
     """Wrap an env so high-level actions select options.
 
     Parameters
@@ -99,7 +126,7 @@ class MetaControllerEnvWrapper(gym.Wrapper):
     capture_primitive_transitions : bool | None, default=None
         Whether to include primitive transitions in the returned info dict.
         If ``None``, it is enabled automatically for ``reward_type='intra_option'``.
-    max_option_steps : int | None, default=None
+    max_option_steps : int, default=50
         Optional safety cap on primitive steps executed by one option.
 
     Notes
@@ -119,7 +146,7 @@ class MetaControllerEnvWrapper(gym.Wrapper):
         include_random_option: bool = True,
         random_option_termination_steps: int = 1,
         capture_primitive_transitions: Optional[bool] = None,
-        max_option_steps: Optional[int] = None,
+        max_option_steps: int = 50,
     ) -> None:
         super().__init__(env)
         if reward_type not in {"smdp", "intra_option"}:
@@ -129,10 +156,10 @@ class MetaControllerEnvWrapper(gym.Wrapper):
         if max_option_steps is not None and max_option_steps <= 0:
             raise ValueError("max_option_steps must be positive when provided.")
 
-        self.reward_type = reward_type
-        self.gamma = float(gamma)
-        self.invalid_option_penalty = float(invalid_option_penalty)
-        self.max_option_steps = max_option_steps
+        self.reward_type: Literal["smdp", "intra_option"] = reward_type
+        self.gamma: float = float(gamma)
+        self.invalid_option_penalty: float = float(invalid_option_penalty)
+        self.max_option_steps: int = max_option_steps
 
         final_options = list(options)
         if include_random_option:
@@ -145,19 +172,19 @@ class MetaControllerEnvWrapper(gym.Wrapper):
         if len(final_options) == 0:
             raise ValueError("MetaControllerEnvWrapper requires at least one option.")
 
-        self.options = final_options
+        self.options: list[BaseOption] = final_options
         if capture_primitive_transitions is None:
             capture_primitive_transitions = reward_type == "intra_option"
-        self.capture_primitive_transitions = bool(capture_primitive_transitions)
+        self.capture_primitive_transitions: bool = bool(capture_primitive_transitions)
 
-        self.observation_space = self.env.observation_space
-        self.action_space = spaces.Discrete(len(self.options))
+        self.observation_space: spaces.Space = self.env.observation_space
+        self.action_space: spaces.Discrete = spaces.Discrete(len(self.options))
         self._last_obs: Optional[np.ndarray] = None
 
     def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
         """Reset wrapped env and internal observation cache."""
         obs, info = self.env.reset(**kwargs)
-        self._last_obs = np.asarray(obs)
+        self._last_obs: Optional[np.ndarray] = np.asarray(obs)
         return obs, info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:

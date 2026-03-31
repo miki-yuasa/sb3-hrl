@@ -3,12 +3,38 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Generic, Optional
+
+from gymnasium.core import ActType, ObsType
 
 from sb3_hrl.typing import SupportsPredict
 
 
-class BaseOption(ABC):
+class BaseIntrinsicReward(ABC, Generic[ObsType, ActType]):
+    """Abstract intrinsic reward interface for subpolicy training wrappers.
+
+    Any reward-logic object used by :class:`SubpolicyTrainingWrapper` should
+    implement :meth:`intrinsic_reward` and can optionally define
+    :meth:`termination_condition` and :meth:`reset_execution_state`.
+    """
+
+    @abstractmethod
+    def intrinsic_reward(
+        self,
+        obs: ObsType,
+        action: ActType,
+        next_obs: ObsType,
+        external_reward: float,
+        done: bool,
+    ) -> float:
+        """Compute intrinsic reward used for option policy training."""
+
+    def reset_execution_state(self) -> None:
+        """Reset internal state at episode/option boundaries."""
+        pass
+
+
+class BaseOption(ABC, Generic[ObsType, ActType]):
     """Abstract option interface.
 
     An option :math:`\\omega` consists of an initiation set, an intra-option
@@ -34,13 +60,12 @@ class BaseOption(ABC):
         """Attach or detach a trained policy model."""
         self._policy = model
 
-    @abstractmethod
-    def initiation_set(self, obs: Any) -> bool:
+    def initiation_set(self, obs: ObsType) -> bool:
         """Check whether option is available in the current state.
 
         Parameters
         ----------
-        obs : Any
+        obs : ObsType
             Current observation.
 
         Returns
@@ -48,14 +73,14 @@ class BaseOption(ABC):
         bool
             ``True`` if the option can be initiated.
         """
+        return True
 
-    @abstractmethod
-    def termination_condition(self, obs: Any) -> bool:
+    def termination_condition(self, obs: ObsType) -> bool:
         """Check whether option execution should terminate.
 
         Parameters
         ----------
-        obs : Any
+        obs : ObsType
             Current observation.
 
         Returns
@@ -63,13 +88,14 @@ class BaseOption(ABC):
         bool
             ``True`` when the option should stop.
         """
+        return False
 
     @abstractmethod
     def intrinsic_reward(
         self,
-        obs: Any,
-        action: Any,
-        next_obs: Any,
+        obs: ObsType,
+        action: ActType,
+        next_obs: ObsType,
         external_reward: float,
         done: bool,
     ) -> float:
@@ -77,11 +103,11 @@ class BaseOption(ABC):
 
         Parameters
         ----------
-        obs : Any
+        obs : ObsType
             Current observation.
-        action : Any
+        action : ActType
             Primitive action taken by the option policy.
-        next_obs : Any
+        next_obs : ObsType
             Next observation.
         external_reward : float
             Reward produced by the wrapped base environment.
@@ -102,19 +128,19 @@ class BaseOption(ABC):
         Stateless options can keep the default implementation.
         """
 
-    def predict(self, obs: Any, deterministic: bool = True) -> Any:
+    def predict(self, obs: ObsType, deterministic: bool = True) -> ActType:
         """Query the attached policy for a primitive action.
 
         Parameters
         ----------
-        obs : Any
+        obs : ObsType
             Observation consumed by the attached policy.
         deterministic : bool, default=True
             Forwarded to SB3 ``predict``.
 
         Returns
         -------
-        Any
+        ActType
             Primitive action sampled by the option policy.
 
         Raises
