@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Generic, Literal, Optional
+from typing import Any, Literal, Optional
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import Wrapper, spaces
-from gymnasium.core import ActType, ObsType, WrapperObsType
+from gymnasium.core import ActType, ObsType
+from gymnasium.utils import RecordConstructorArgs
+
+from sb3_hrl.typing import SB3ObsType
 
 from .options import BaseIntrinsicReward, BaseOption, RandomOption
 
 
 class SubpolicyTrainingWrapper(
-    Wrapper[ObsType, ActType, ObsType, ActType],
-    Generic[ObsType, ActType],
+    Wrapper[ObsType, ActType, ObsType, ActType], RecordConstructorArgs
 ):
     """Wrap an environment to train one specific option subpolicy.
 
@@ -48,7 +50,13 @@ class SubpolicyTrainingWrapper(
         intrinsic_reward_args: dict[str, Any] | None = None,
         termination_condition: Optional[Callable[[ObsType], bool]] = None,
     ) -> None:
-        super().__init__(env)
+        RecordConstructorArgs.__init__(
+            self,
+            intrinsic_reward_cls=intrinsic_reward_cls,
+            intrinsic_reward_args=intrinsic_reward_args,
+            termination_condition=termination_condition,
+        )
+        Wrapper.__init__(self, env)
         self._last_obs: Optional[ObsType] = None
 
         self._intrinsic_reward: BaseIntrinsicReward[ObsType, ActType] = (
@@ -99,8 +107,8 @@ class SubpolicyTrainingWrapper(
 
 
 class MetaControllerEnvWrapper(
-    Wrapper[WrapperObsType, int, ObsType, ActType],
-    Generic[WrapperObsType, ObsType, ActType],
+    Wrapper[SB3ObsType, int, SB3ObsType, ActType],
+    RecordConstructorArgs,
 ):
     """Wrap an env so high-level actions select options.
 
@@ -147,8 +155,22 @@ class MetaControllerEnvWrapper(
         random_option_termination_steps: int = 1,
         capture_primitive_transitions: Optional[bool] = None,
         max_option_steps: int = 50,
+        include_step_count_in_obs: bool = False,
     ) -> None:
-        super().__init__(env)
+        RecordConstructorArgs.__init__(
+            self,
+            env=env,
+            options=options,
+            reward_type=reward_type,
+            gamma=gamma,
+            invalid_option_penalty=invalid_option_penalty,
+            include_random_option=include_random_option,
+            random_option_termination_steps=random_option_termination_steps,
+            capture_primitive_transitions=capture_primitive_transitions,
+            max_option_steps=max_option_steps,
+            include_step_count_in_obs=include_step_count_in_obs,
+        )
+        Wrapper.__init__(self, env)
         if reward_type not in {"smdp", "intra_option"}:
             raise ValueError("reward_type must be 'smdp' or 'intra_option'.")
         if not (0.0 <= gamma <= 1.0):
@@ -160,8 +182,9 @@ class MetaControllerEnvWrapper(
         self.gamma: float = float(gamma)
         self.invalid_option_penalty: float = float(invalid_option_penalty)
         self.max_option_steps: int = max_option_steps
+        self.include_step_count_in_obs: bool = include_step_count_in_obs
 
-        final_options = list(options)
+        final_options: list[BaseOption] = options
         if include_random_option:
             final_options.append(
                 RandomOption(
@@ -177,17 +200,59 @@ class MetaControllerEnvWrapper(
             capture_primitive_transitions = reward_type == "intra_option"
         self.capture_primitive_transitions: bool = bool(capture_primitive_transitions)
 
-        self.observation_space: spaces.Space = self.env.observation_space
-        self.action_space: spaces.Discrete = spaces.Discrete(len(self.options))
-        self._last_obs: Optional[np.ndarray] = None
+        self.observation_space: spaces.Space = (
+            self._build_observation_space_with_step_count(self.env.observation_space)
+            if include_step_count_in_obs
+            else self.env.observation_space
+        )
 
-    def reset(self, **kwargs: Any) -> tuple[np.ndarray, dict[str, Any]]:
+        self.action_space: spaces.Discrete = spaces.Discrete(len(self.options))
+        self._last_obs: SB3ObsType | None = None
+
+    def _add_step_count_to_obs(self, obs: SB3ObsType, policy_step: int) -> SB3ObsType:
+        """Add normalized low-level policy step count to dict observations."""
+
+        denom = max(1, self.max_option_steps)
+        step_ratio = np.float32(policy_step / denom)
+        step_count = np.array([step_ratio], dtype=np.float32)
+
+        if not isinstance(obs, dict):
+            return {
+                "observation": obs,
+                "step_count": step_count,
+            }
+        obs_with_step = dict(obs)
+        obs_with_step["step_count"] = step_count
+        return obs_with_step
+
+    def _build_observation_space_with_step_count(
+        self,
+        observation_space: spaces.Space,
+    ) -> spaces.Space:
+        """Extend Dict observation spaces with a normalized step_count field."""
+        step_count_space = spaces.Box(
+            low=np.array([0.0], dtype=np.float32),
+            high=np.array([1.0], dtype=np.float32),
+            shape=(1,),
+            dtype=np.float32,
+        )
+        if not isinstance(observation_space, spaces.Dict):
+            return spaces.Dict(
+                observation=observation_space,
+                step_count=step_count_space,
+            )
+        else:
+            spaces_dict = dict(observation_space.spaces)
+            spaces_dict["step_count"] = step_count_space
+            return spaces.Dict(spaces_dict)
+
+    def reset(self, **kwargs: Any) -> tuple[SB3ObsType, dict[str, Any]]:
         """Reset wrapped env and internal observation cache."""
         obs, info = self.env.reset(**kwargs)
-        self._last_obs: Optional[np.ndarray] = np.asarray(obs)
+        self._last_obs = obs
         return obs, info
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    def step(self, action: int) -> tuple[SB3ObsType, float, bool, bool, dict[str, Any]]:
         """Execute one selected option and return one macro transition."""
         if self._last_obs is None:
             raise RuntimeError(
