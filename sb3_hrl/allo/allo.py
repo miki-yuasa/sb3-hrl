@@ -161,7 +161,7 @@ class ALLO(BaseAlgorithm):
     def __init__(
         self,
         env: Union[GymEnv, str],
-        representation_dim: int,
+        representation_dim: int = 1,
         learning_rate: float = 3e-4,
         buffer_size: int = 100_000,
         batch_size: int = 256,
@@ -245,8 +245,6 @@ class ALLO(BaseAlgorithm):
             Torch device for model and tensors.
         policy : BasePolicy | None, default=None
             Ignored placeholder to satisfy SB3 API. ALLO uses a fixed random policy
-        _init_setup_model : bool, default=True
-            Always `True` for ALLO for API consistency.
 
         Returns
         -------
@@ -289,12 +287,6 @@ class ALLO(BaseAlgorithm):
         self.grad_clip_norm = float(grad_clip_norm)
         self.hidden_dims = hidden_dims
         self.auto_collect_if_needed = bool(auto_collect_if_needed)
-        self._flat_obs_space = space_utils.flatten_space(self.observation_space)
-        if not isinstance(self._flat_obs_space, spaces.Box):
-            raise TypeError("ALLO requires a flattenable Box observation space.")
-        self._obs_dim = int(np.prod(self._flat_obs_space.shape))
-        obs_shape = self.observation_space.shape
-        self._obs_ndim = len(obs_shape) if obs_shape is not None else 1
 
         self.feature_net: _LaplacianFeatureNet
         self.optimizer: th.optim.Optimizer
@@ -312,7 +304,8 @@ class ALLO(BaseAlgorithm):
 
         self._allo_last_obs: Optional[Union[np.ndarray, dict[str, np.ndarray]]] = None
 
-        self._setup_model()
+        if _init_setup_model:
+            self._setup_model()
 
     def _setup_model(self) -> None:
         """Create replay buffer, feature network, and ALLO state tensors.
@@ -327,6 +320,13 @@ class ALLO(BaseAlgorithm):
         None
             Allocates internal model, optimizer, and constrained variables.
         """
+        self._flat_obs_space = space_utils.flatten_space(self.observation_space)
+        if not isinstance(self._flat_obs_space, spaces.Box):
+            raise TypeError("ALLO requires a flattenable Box observation space.")
+        self._obs_dim = int(np.prod(self._flat_obs_space.shape))
+        obs_shape = self.observation_space.shape
+        self._obs_ndim = len(obs_shape) if obs_shape is not None else 1
+
         self.replay_buffer = ReplayBuffer(
             buffer_size=self.buffer_size,
             observation_space=self._flat_obs_space,
