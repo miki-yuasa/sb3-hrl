@@ -3,14 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Protocol
+from typing import Any, Optional
 
-
-class SupportsPredict(Protocol):
-    """Structural type for SB3-like policies exposing ``predict``."""
-
-    def predict(self, observation: Any, deterministic: bool = True):
-        """Return action and optional policy state."""
+from sb3_hrl.typing import SupportsPredict
 
 
 class BaseOption(ABC):

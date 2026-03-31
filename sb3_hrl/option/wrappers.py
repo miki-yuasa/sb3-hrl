@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .base import BaseOption
-from .random_option import RandomOption
+from .options import BaseOption, RandomOption
 
 
 class SubpolicyTrainingWrapper(gym.Wrapper):
@@ -84,7 +83,7 @@ class MetaControllerEnvWrapper(gym.Wrapper):
         Wrapped base environment.
     options : list[BaseOption]
         Trained options available to the meta-controller.
-    reward_type : {"smdp", "intra_option"}, default="smdp"
+    reward_type : Literal["smdp", "intra_option"], default="smdp"
         Reward semantics at the meta step.
         ``"smdp"`` returns discounted macro reward,
         ``"intra_option"`` returns undiscounted macro reward and exposes
@@ -114,7 +113,7 @@ class MetaControllerEnvWrapper(gym.Wrapper):
         self,
         env: gym.Env,
         options: list[BaseOption],
-        reward_type: str = "smdp",
+        reward_type: Literal["smdp", "intra_option"] = "smdp",
         gamma: float = 0.99,
         invalid_option_penalty: float = -1.0,
         include_random_option: bool = True,
