@@ -14,7 +14,9 @@ class _CounterEnv(gym.Env[np.ndarray, int]):
 
     def __init__(self, terminate_at: int = 100) -> None:
         super().__init__()
-        self.observation_space = spaces.Box(low=0.0, high=1000.0, shape=(1,), dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=0.0, high=1000.0, shape=(1,), dtype=np.float32
+        )
         self.action_space = spaces.Discrete(2)
         self.terminate_at = terminate_at
         self.count = 0

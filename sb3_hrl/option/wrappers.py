@@ -47,7 +47,9 @@ class SubpolicyTrainingWrapper(gym.Wrapper):
     def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         """Forward primitive action and return option-specific intrinsic reward."""
         if self._last_obs is None:
-            raise RuntimeError("Call reset() before step() in SubpolicyTrainingWrapper.")
+            raise RuntimeError(
+                "Call reset() before step() in SubpolicyTrainingWrapper."
+            )
 
         next_obs, external_reward, terminated, truncated, info = self.env.step(action)
         done = bool(terminated or truncated)
@@ -162,7 +164,9 @@ class MetaControllerEnvWrapper(gym.Wrapper):
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         """Execute one selected option and return one macro transition."""
         if self._last_obs is None:
-            raise RuntimeError("Call reset() before step() in MetaControllerEnvWrapper.")
+            raise RuntimeError(
+                "Call reset() before step() in MetaControllerEnvWrapper."
+            )
         if not self.action_space.contains(action):
             raise ValueError("Action index out of range for MetaControllerEnvWrapper.")
 
@@ -194,7 +198,9 @@ class MetaControllerEnvWrapper(gym.Wrapper):
 
         while True:
             primitive_action = option.predict(obs)
-            next_obs, reward, terminated, truncated, step_info = self.env.step(primitive_action)
+            next_obs, reward, terminated, truncated, step_info = self.env.step(
+                primitive_action
+            )
 
             if self.reward_type == "smdp":
                 total_reward += effective_gamma * float(reward)
