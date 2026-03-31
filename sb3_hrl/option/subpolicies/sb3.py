@@ -8,12 +8,12 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 
 from sb3_hrl.utils.io import get_class
 
-from .base import SubPolicy
+from .base import BaseSubPolicy
 
 SB3ObsType = np.ndarray | dict[str, np.ndarray]
 
 
-class SB3SubPolicy(SubPolicy[BaseAlgorithm, SB3ObsType, NDArray]):
+class SB3SubPolicy(BaseSubPolicy[BaseAlgorithm, SB3ObsType, NDArray]):
     """
     This class defines SB3-based subpolicies used in option-based HRL.
     """

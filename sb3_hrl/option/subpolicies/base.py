@@ -9,7 +9,7 @@ PolicyType = TypeVar("PolicyType")
 PolicyArgsType = TypeVar("PolicyArgsType")
 
 
-class SubPolicyBuffer(Generic[PolicyArgsType]):
+class BaseSubPolicyBuffer(Generic[PolicyArgsType]):
     def __init__(self, policy_args: PolicyArgsType) -> None:
         self.policy_args = policy_args
 
@@ -17,25 +17,25 @@ class SubPolicyBuffer(Generic[PolicyArgsType]):
         pass
 
 
-class SubPolicy(Generic[PolicyType, ObsType, ActType], ABC):
-    buffer_class: type[SubPolicyBuffer] = SubPolicyBuffer
+class BaseSubPolicy(Generic[PolicyType, ObsType, ActType], ABC):
+    buffer_class: type[BaseSubPolicyBuffer] = BaseSubPolicyBuffer
 
     def __init__(
         self,
-        env: Env[ObsType, ActType],
-        tl_spec: str,
+        curr_env: Env[ObsType, ActType],
         max_policy_steps: int,
         policy_args: dict[str, Any],
-        buffer: SubPolicyBuffer[dict[str, Any]] | None = None,
+        buffer: BaseSubPolicyBuffer[dict[str, Any]] | None = None,
         verbose: bool = False,
     ) -> None:
-        self.env: Env[ObsType, ActType] = env
-        self.tl_spec: str = tl_spec
+        self.env: Env[ObsType, ActType] = curr_env
         self.max_policy_steps: int = max_policy_steps
         self.policy_step: int = 0
-        self.buffer: SubPolicyBuffer[dict[str, Any]] | None = buffer
+        self.buffer: BaseSubPolicyBuffer[dict[str, Any]] | None = buffer
         self.policy: PolicyType = self.define_policy(policy_args)
         self.verbose: bool = verbose
+
+        self.cum_reward: float = 0.0
 
     def predict(
         self,
