@@ -97,7 +97,7 @@ class BaseOption(Generic[ObsType, ActType]):
                     "No policy is attached to this option. "
                     "Set option.policy or provide policy_cls/policy_kwargs."
                 )
-            self._policy = self._policy_cls(**self._policy_kwargs)
+            self._policy = self._policy_cls.load(**self._policy_kwargs)
         return self._policy
 
     def initiation_set(self, obs: ObsType) -> bool:

@@ -19,5 +19,12 @@ class SupportsPredict(Protocol, Generic[ObsType, ActType]):
         """Return action and optional policy state."""
         ...
 
+    @classmethod
+    def load(
+        cls, path: str, device: str | None = None
+    ) -> SupportsPredict[ObsType, ActType]:
+        """Load a policy from file."""
+        ...
+
 
 SB3ObsType = np.ndarray | dict[str, np.ndarray]
