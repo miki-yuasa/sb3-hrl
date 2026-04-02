@@ -382,9 +382,9 @@ class PrimitiveStepTimeLimit(
         max_episode_steps : int
             Number of primitive steps before truncation.
         """
-        assert isinstance(
-            max_episode_steps, int
-        ) and max_episode_steps > 0, f"max_episode_steps must be positive, got {max_episode_steps}"
+        assert isinstance(max_episode_steps, int) and max_episode_steps > 0, (
+            f"max_episode_steps must be positive, got {max_episode_steps}"
+        )
 
         RecordConstructorArgs.__init__(self, max_episode_steps=max_episode_steps)
         Wrapper.__init__(self, env)
@@ -398,7 +398,9 @@ class PrimitiveStepTimeLimit(
         self._cumulative_primitive_steps = 0
         return obs, info
 
-    def step(self, action: int) -> tuple[SB3ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: int
+    ) -> tuple[SB3ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         """Step through environment and check primitive step limit.
 
         Parameters
@@ -427,4 +429,8 @@ class PrimitiveStepTimeLimit(
         return obs, reward, terminated, truncated, info
 
 
-__all__ = ["SubpolicyTrainingWrapper", "MetaControllerEnvWrapper", "PrimitiveStepTimeLimit"]
+__all__ = [
+    "SubpolicyTrainingWrapper",
+    "MetaControllerEnvWrapper",
+    "PrimitiveStepTimeLimit",
+]
