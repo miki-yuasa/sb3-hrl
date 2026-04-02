@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
-from typing import Any, Literal, Optional, SupportsFloat
+from typing import Any, Literal, Optional, SupportsFloat, cast
 
 import gymnasium as gym
 import numpy as np
@@ -429,8 +429,105 @@ class PrimitiveStepTimeLimit(
         return obs, reward, terminated, truncated, info
 
 
+class MetaControllerPrimitiveStepTimeLimitWrapper(
+    Wrapper[SB3ObsType, int, SB3ObsType, int],
+    RecordConstructorArgs,
+):
+    """Compose MetaControllerEnvWrapper and PrimitiveStepTimeLimit in one class.
+
+    This convenience wrapper is equivalent to:
+
+        env = MetaControllerEnvWrapper(...)
+        env = PrimitiveStepTimeLimit(env, max_episode_steps=...)
+
+    Parameters
+    ----------
+    env : gym.Env
+        Base environment.
+    options : list[BaseOption]
+        Trained options available to the meta-controller.
+    max_episode_steps : int
+        Primitive-step episode horizon used by PrimitiveStepTimeLimit.
+    reward_type : Literal["smdp", "intra_option"], default="smdp"
+        Reward semantics at each macro step.
+    gamma : float, default=0.99
+        Discount used for SMDP return accumulation.
+    invalid_option_penalty : float, default=-1.0
+        Reward emitted when selected option cannot be initiated.
+    include_random_option : bool, default=True
+        Whether to append a built-in random option.
+    random_option_termination_steps : int, default=1
+        Primitive-step horizon for the random option.
+    capture_primitive_transitions : bool | None, default=None
+        Whether primitive transitions are included in the info dict.
+    max_option_steps : int, default=50
+        Safety cap on primitive steps executed by one option.
+    include_step_count_in_obs : bool, default=False
+        Whether to include normalized option step count in observations.
+    """
+
+    def __init__(
+        self,
+        env: gym.Env,
+        options: list[BaseOption],
+        max_episode_steps: int,
+        reward_type: Literal["smdp", "intra_option"] = "smdp",
+        gamma: float = 0.99,
+        invalid_option_penalty: float = -1.0,
+        include_random_option: bool = True,
+        random_option_termination_steps: int = 1,
+        capture_primitive_transitions: Optional[bool] = None,
+        max_option_steps: int = 50,
+        include_step_count_in_obs: bool = False,
+    ) -> None:
+        RecordConstructorArgs.__init__(
+            self,
+            env=env,
+            options=options,
+            max_episode_steps=max_episode_steps,
+            reward_type=reward_type,
+            gamma=gamma,
+            invalid_option_penalty=invalid_option_penalty,
+            include_random_option=include_random_option,
+            random_option_termination_steps=random_option_termination_steps,
+            capture_primitive_transitions=capture_primitive_transitions,
+            max_option_steps=max_option_steps,
+            include_step_count_in_obs=include_step_count_in_obs,
+        )
+
+        meta_env = MetaControllerEnvWrapper(
+            env=env,
+            options=options,
+            reward_type=reward_type,
+            gamma=gamma,
+            invalid_option_penalty=invalid_option_penalty,
+            include_random_option=include_random_option,
+            random_option_termination_steps=random_option_termination_steps,
+            capture_primitive_transitions=capture_primitive_transitions,
+            max_option_steps=max_option_steps,
+            include_step_count_in_obs=include_step_count_in_obs,
+        )
+        wrapped_env = PrimitiveStepTimeLimit(
+            env=meta_env,
+            max_episode_steps=max_episode_steps,
+        )
+        Wrapper.__init__(self, wrapped_env)
+
+    @property
+    def meta_controller_env(self) -> MetaControllerEnvWrapper:
+        """Return the inner MetaControllerEnvWrapper instance."""
+        primitive_limit_env = cast(PrimitiveStepTimeLimit, self.env)
+        return cast(MetaControllerEnvWrapper, primitive_limit_env.env)
+
+    @property
+    def primitive_step_time_limit_env(self) -> PrimitiveStepTimeLimit:
+        """Return the inner PrimitiveStepTimeLimit instance."""
+        return cast(PrimitiveStepTimeLimit, self.env)
+
+
 __all__ = [
     "SubpolicyTrainingWrapper",
     "MetaControllerEnvWrapper",
     "PrimitiveStepTimeLimit",
+    "MetaControllerPrimitiveStepTimeLimitWrapper",
 ]

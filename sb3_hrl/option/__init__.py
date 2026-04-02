@@ -10,6 +10,7 @@ from .options import (
 )
 from .wrappers import (
     MetaControllerEnvWrapper,
+    MetaControllerPrimitiveStepTimeLimitWrapper,
     PrimitiveStepTimeLimit,
     SubpolicyTrainingWrapper,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "SubpolicyTrainingWrapper",
     "MetaControllerEnvWrapper",
     "PrimitiveStepTimeLimit",
+    "MetaControllerPrimitiveStepTimeLimitWrapper",
     "PrimitiveStepCountCallback",
     "IntraOptionReplayBuffer",
     "IntraOptionUpdateCallback",
