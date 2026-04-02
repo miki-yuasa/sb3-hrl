@@ -6,6 +6,8 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from sb3_hrl.option.callbacks import PrimitiveStepCountCallback
@@ -111,3 +113,49 @@ def test_sampling_budget_uses_meta_timesteps() -> None:
     # before the outer learn loop checks the primitive total_timesteps budget.
     assert model.num_timesteps == 12
     assert model._n_updates == 1
+
+
+def test_monitor_episode_length_is_converted_to_primitive_steps() -> None:
+    env = DummyVecEnv([lambda: Monitor(PrimitiveInfoEnv([3], episode_len=2))])
+    model = _build_model(env, n_steps=2)
+
+    model.learn(total_timesteps=6)
+
+    assert model.ep_info_buffer is not None
+    assert len(model.ep_info_buffer) > 0
+    assert model.ep_info_buffer[-1]["l"] == 6
+
+
+class _CounterPbar:
+    def __init__(self) -> None:
+        self.total = 0
+
+    def update(self, value: int) -> None:
+        self.total += value
+
+
+class _MacroLikeProgressCallback(BaseCallback):
+    """Mimics SB3 progress callback behavior (macro-step increments)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pbar = _CounterPbar()
+
+    def _on_step(self) -> bool:
+        self.pbar.update(self.training_env.num_envs)
+        return True
+
+
+def test_progress_callback_is_adjusted_to_primitive_steps() -> None:
+    env = DummyVecEnv(
+        [
+            lambda: PrimitiveInfoEnv([2], episode_len=64),
+            lambda: PrimitiveInfoEnv([5], episode_len=64),
+        ]
+    )
+    model = _build_model(env, n_steps=1)
+    callback = _MacroLikeProgressCallback()
+
+    model.learn(total_timesteps=14, callback=callback)
+
+    assert callback.pbar.total == 14

@@ -48,27 +48,65 @@ class PrimitiveStepPPO(PPO):
     }
 
     @staticmethod
-    def _extract_primitive_steps(infos: list[dict[str, Any]]) -> int:
-        primitive_steps = 0
-        for info in infos:
-            if not isinstance(info, dict):
-                primitive_steps += 1
+    def _extract_primitive_steps_per_env(
+        infos: list[dict[str, Any]],
+        n_envs: int,
+    ) -> np.ndarray:
+        """Extract primitive-step counts for each environment in a VecEnv step."""
+        per_env_steps = np.ones(n_envs, dtype=np.int64)
+
+        for env_idx in range(n_envs):
+            info: Any = infos[env_idx] if env_idx < len(infos) else {}
+            step_count = 1
+
+            if isinstance(info, dict):
+                raw_steps = info.get("meta_option_steps", 1)
+                try:
+                    step_count = int(raw_steps)
+                except (TypeError, ValueError):
+                    step_count = 1
+
+            per_env_steps[env_idx] = max(0, step_count)
+
+        # Avoid stalling progress when all infos report invalid/non-positive values.
+        if int(per_env_steps.sum()) <= 0:
+            per_env_steps.fill(1)
+
+        return per_env_steps
+
+    @staticmethod
+    def _adjust_progress_bar(callback: BaseCallback, delta_steps: int) -> None:
+        """Adjust SB3 progress bar callbacks by primitive-minus-macro delta.
+
+        SB3's built-in ProgressBarCallback increments by ``n_envs`` per vec step.
+        This patch adds the remaining delta so the bar reflects primitive steps.
+        """
+        if delta_steps == 0:
+            return
+
+        visited: set[int] = set()
+        stack: list[BaseCallback] = [callback]
+
+        while stack:
+            current = stack.pop()
+            current_id = id(current)
+            if current_id in visited:
                 continue
+            visited.add(current_id)
 
-            raw_steps = info.get("meta_option_steps", 1)
-            try:
-                step_count = int(raw_steps)
-            except (TypeError, ValueError):
-                step_count = 1
-            primitive_steps += max(0, step_count)
+            pbar = getattr(current, "pbar", None)
+            if pbar is not None and hasattr(pbar, "update"):
+                pbar.update(delta_steps)
 
-        if primitive_steps <= 0:
-            raise ValueError(
-                f"Invalid primitive step count extracted from infos: {primitive_steps}. "
-                "Check that 'meta_option_steps' is correctly set in the environment's info dict."
-            )
+            child = getattr(current, "callback", None)
+            if isinstance(child, BaseCallback):
+                stack.append(child)
 
-        return primitive_steps
+            children = getattr(current, "callbacks", None)
+            if isinstance(children, list):
+                for maybe_callback in children:
+                    if isinstance(maybe_callback, BaseCallback):
+                        stack.append(maybe_callback)
 
     def collect_rollouts(
         self,
@@ -82,6 +120,7 @@ class PrimitiveStepPPO(PPO):
 
         primitive_steps = 0
         macro_steps = 0
+        episode_primitive_steps = np.zeros(env.num_envs, dtype=np.int64)
         new_obs = self._last_obs
         dones = np.zeros(env.num_envs, dtype=bool)
         rollout_buffer.reset()
@@ -115,13 +154,30 @@ class PrimitiveStepPPO(PPO):
 
             new_obs, rewards, dones, infos = env.step(clipped_actions)
 
-            primitive_increment = self._extract_primitive_steps(infos)
+            per_env_primitive_steps = self._extract_primitive_steps_per_env(
+                infos,
+                env.num_envs,
+            )
+            primitive_increment = int(per_env_primitive_steps.sum())
             self.num_timesteps += primitive_increment
             primitive_steps += primitive_increment
+            episode_primitive_steps += per_env_primitive_steps
+
+            for idx, done in enumerate(dones):
+                info = infos[idx]
+                if done and isinstance(info, dict):
+                    maybe_ep_info = info.get("episode")
+                    if isinstance(maybe_ep_info, dict):
+                        maybe_ep_info["l"] = int(episode_primitive_steps[idx])
+                if done:
+                    episode_primitive_steps[idx] = 0
 
             callback.update_locals(locals())
             if not callback.on_step():
                 return False
+
+            # ProgressBarCallback already added n_envs; add the primitive delta.
+            self._adjust_progress_bar(callback, primitive_increment - env.num_envs)
 
             self._update_info_buffer(infos, dones)
             macro_steps += 1
