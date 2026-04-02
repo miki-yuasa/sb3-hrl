@@ -34,7 +34,7 @@ class BaseIntrinsicReward(ABC, Generic[ObsType, ActType]):
         pass
 
 
-class BaseOption(ABC, Generic[ObsType, ActType]):
+class BaseOption(Generic[ObsType, ActType]):
     """Abstract option interface.
 
     An option :math:`\\omega` consists of an initiation set, an intra-option
