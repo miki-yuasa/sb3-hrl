@@ -1,5 +1,6 @@
 """Option framework components for hierarchical RL."""
 
+from .callbacks import PrimitiveStepCountCallback
 from .options import (
     BaseIntrinsicReward,
     BaseOption,
@@ -7,7 +8,11 @@ from .options import (
     IntraOptionUpdateCallback,
     RandomOption,
 )
-from .wrappers import MetaControllerEnvWrapper, SubpolicyTrainingWrapper
+from .wrappers import (
+    MetaControllerEnvWrapper,
+    PrimitiveStepTimeLimit,
+    SubpolicyTrainingWrapper,
+)
 
 __all__ = [
     "BaseIntrinsicReward",
@@ -15,6 +20,8 @@ __all__ = [
     "RandomOption",
     "SubpolicyTrainingWrapper",
     "MetaControllerEnvWrapper",
+    "PrimitiveStepTimeLimit",
+    "PrimitiveStepCountCallback",
     "IntraOptionReplayBuffer",
     "IntraOptionUpdateCallback",
 ]

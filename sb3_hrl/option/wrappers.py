@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, SupportsFloat
 
 import gymnasium as gym
 import numpy as np
@@ -209,6 +209,7 @@ class MetaControllerEnvWrapper(
 
         self.action_space: spaces.Discrete = spaces.Discrete(len(self.options))
         self._last_obs: SB3ObsType | None = None
+        self._episode_primitive_steps: int = 0
 
     def _add_step_count_to_obs(self, obs: SB3ObsType, policy_step: int) -> SB3ObsType:
         """Add normalized low-level policy step count to dict observations."""
@@ -251,6 +252,7 @@ class MetaControllerEnvWrapper(
         """Reset wrapped env and internal observation cache."""
         obs, info = self.env.reset(**kwargs)
         self._last_obs = obs
+        self._episode_primitive_steps = 0
         return obs, info
 
     def step(self, action: int) -> tuple[SB3ObsType, float, bool, bool, dict[str, Any]]:
@@ -314,6 +316,7 @@ class MetaControllerEnvWrapper(
                 )
 
             steps += 1
+            self._episode_primitive_steps += 1
             option_terminated = bool(option.termination_condition(next_obs))
             obs: SB3ObsType = next_obs
             last_info: dict[str, Any] = dict(step_info)
@@ -331,6 +334,7 @@ class MetaControllerEnvWrapper(
         info["option_index"] = int(action)
         info["option_terminated"] = option_terminated
         info["meta_option_steps"] = steps
+        info["cumulative_primitive_steps"] = self._episode_primitive_steps
         info["effective_gamma"] = float(effective_gamma)
         info["reward_type"] = self.reward_type
         if self.capture_primitive_transitions:
@@ -339,4 +343,88 @@ class MetaControllerEnvWrapper(
         return obs, float(total_reward), bool(terminated), bool(truncated), info
 
 
-__all__ = ["SubpolicyTrainingWrapper", "MetaControllerEnvWrapper"]
+class PrimitiveStepTimeLimit(
+    Wrapper[SB3ObsType, int, SB3ObsType, int], RecordConstructorArgs
+):
+    """Wrap MetaControllerEnvWrapper to truncate episodes based on primitive step count.
+
+    Unlike gymnasium's TimeLimit which counts macro steps (option selections), this wrapper
+    truncates based on total primitive actions executed by the low-level policy. This provides
+    clearer semantics when training hierarchical policies.
+
+    Parameters
+    ----------
+    env : gym.Env
+        Should be a MetaControllerEnvWrapper. Will work with other wrappers but semantics
+        depend on whether they expose 'meta_option_steps' in the info dict.
+    max_episode_steps : int
+        Maximum number of primitive steps allowed per episode. Episode truncates when
+        cumulative primitive steps >= max_episode_steps.
+
+    Notes
+    -----
+    This wrapper should wrap MetaControllerEnvWrapper directly. Example:
+
+        env = MetaControllerEnvWrapper(env, options=[...], include_step_count_in_obs=False)
+        env = PrimitiveStepTimeLimit(env, max_episode_steps=500)
+
+    The step count in the observation is separate from truncation logic and can be
+    enabled independently via include_step_count_in_obs on MetaControllerEnvWrapper.
+    """
+
+    def __init__(self, env: gym.Env, max_episode_steps: int):
+        """Initialize the wrapper.
+
+        Parameters
+        ----------
+        env : gym.Env
+            Environment to wrap (typically MetaControllerEnvWrapper).
+        max_episode_steps : int
+            Number of primitive steps before truncation.
+        """
+        assert isinstance(
+            max_episode_steps, int
+        ) and max_episode_steps > 0, f"max_episode_steps must be positive, got {max_episode_steps}"
+
+        RecordConstructorArgs.__init__(self, max_episode_steps=max_episode_steps)
+        Wrapper.__init__(self, env)
+
+        self._max_episode_steps = max_episode_steps
+        self._cumulative_primitive_steps = 0
+
+    def reset(self, **kwargs: Any) -> tuple[SB3ObsType, dict[str, Any]]:
+        """Reset environment and step counter."""
+        obs, info = self.env.reset(**kwargs)
+        self._cumulative_primitive_steps = 0
+        return obs, info
+
+    def step(self, action: int) -> tuple[SB3ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
+        """Step through environment and check primitive step limit.
+
+        Parameters
+        ----------
+        action : int
+            High-level action (option index).
+
+        Returns
+        -------
+        tuple
+            (observation, reward, terminated, truncated, info) with truncated=True
+            if primitive step limit reached.
+        """
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        # Get the number of primitive steps executed in this option
+        meta_option_steps = info.get("meta_option_steps", 0)
+        self._cumulative_primitive_steps += meta_option_steps
+
+        # Check if we've exceeded the primitive step limit
+        if self._cumulative_primitive_steps >= self._max_episode_steps:
+            truncated = True
+            # Mark in info that truncation was due to time limit
+            info.setdefault("TimeLimit.truncated", True)
+
+        return obs, reward, terminated, truncated, info
+
+
+__all__ = ["SubpolicyTrainingWrapper", "MetaControllerEnvWrapper", "PrimitiveStepTimeLimit"]
