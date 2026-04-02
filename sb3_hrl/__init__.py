@@ -15,6 +15,7 @@ from sb3_hrl.option import (
     IntraOptionUpdateCallback,
     MetaControllerPrimitiveStepTimeLimitWrapper,
     PrimitiveStepCountCallback,
+    PrimitiveStepPPO,
     RandomOption,
     SubpolicyTrainingWrapper,
 )
@@ -35,5 +36,6 @@ __all__ = [
     "IntraOptionUpdateCallback",
     "MetaControllerPrimitiveStepTimeLimitWrapper",
     "PrimitiveStepCountCallback",
+    "PrimitiveStepPPO",
     "SubpolicyTrainingWrapper",
 ]

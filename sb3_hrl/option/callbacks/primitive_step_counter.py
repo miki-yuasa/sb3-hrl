@@ -34,6 +34,10 @@ class PrimitiveStepCountCallback(BaseCallback):
     should match the desired primitive step limit, not macro steps.
     """
 
+    def __init__(self, verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+        self._warned_primitive_aware_model = False
+
     def _on_step(self) -> bool:
         """Read meta_option_steps from info and adjust num_timesteps accordingly.
 
@@ -42,6 +46,15 @@ class PrimitiveStepCountCallback(BaseCallback):
         bool
             Always returns True to continue training.
         """
+        if getattr(self.model, "_primitive_step_aware", False):
+            if self.verbose > 0 and not self._warned_primitive_aware_model:
+                print(
+                    "PrimitiveStepCountCallback: primitive-aware model detected; "
+                    "skipping timestep adjustment to avoid double counting."
+                )
+                self._warned_primitive_aware_model = True
+            return True
+
         # Get the info dicts from the step (one per parallel environment)
         infos = self.locals.get("infos", [])
 

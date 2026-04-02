@@ -8,6 +8,7 @@ from .options import (
     IntraOptionUpdateCallback,
     RandomOption,
 )
+from .policies import PrimitiveStepPPO
 from .wrappers import (
     MetaControllerEnvWrapper,
     MetaControllerPrimitiveStepTimeLimitWrapper,
@@ -24,6 +25,7 @@ __all__ = [
     "PrimitiveStepTimeLimit",
     "MetaControllerPrimitiveStepTimeLimitWrapper",
     "PrimitiveStepCountCallback",
+    "PrimitiveStepPPO",
     "IntraOptionReplayBuffer",
     "IntraOptionUpdateCallback",
 ]

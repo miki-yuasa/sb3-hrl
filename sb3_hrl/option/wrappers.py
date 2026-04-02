@@ -531,6 +531,4 @@ class MetaControllerPrimitiveStepTimeLimitWrapper(
 __all__ = [
     "SubpolicyTrainingWrapper",
     "MetaControllerEnvWrapper",
-    "PrimitiveStepTimeLimit",
-    "MetaControllerPrimitiveStepTimeLimitWrapper",
 ]
