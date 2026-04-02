@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Generic, Optional
+from collections.abc import Mapping
+from typing import Any, Generic, Optional
 
 from gymnasium.core import ActType, ObsType
-from stable_baselines3.common.base_class import BaseAlgorithm
 
 from sb3_hrl.typing import SupportsPredict
 
@@ -44,14 +44,26 @@ class BaseOption(Generic[ObsType, ActType]):
     Parameters
     ----------
     policy : SupportsPredict | None, default=None
-        Attached SB3 model (or model-like object) used to generate primitive
+        Attached policy model (or model-like object) used to generate primitive
         actions through :meth:`predict`.
+    policy_factory : callable | None, default=None
+        Optional lazy factory used to construct the policy on first use.
+    policy_kwargs : mapping | None, default=None
+        Keyword arguments passed to ``policy_factory`` at construction time.
     """
 
     def __init__(
-        self, policy: Optional[SupportsPredict[ObsType, ActType]] = None
+        self,
+        policy: Optional[SupportsPredict[ObsType, ActType]] = None,
+        policy_cls: Optional[type[SupportsPredict[ObsType, ActType]]] = None,
+        policy_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
+        if policy is not None and policy_cls is not None:
+            raise ValueError("Provide either policy or policy_cls, not both.")
+
         self._policy: Optional[SupportsPredict[ObsType, ActType]] = policy
+        self._policy_cls: Optional[type[SupportsPredict[ObsType, ActType]]] = policy_cls
+        self._policy_kwargs: dict[str, Any] = dict(policy_kwargs or {})
 
     @property
     def policy(self) -> Optional[SupportsPredict[ObsType, ActType]]:
@@ -62,6 +74,31 @@ class BaseOption(Generic[ObsType, ActType]):
     def policy(self, model: Optional[SupportsPredict[ObsType, ActType]]) -> None:
         """Attach or detach a trained policy model."""
         self._policy = model
+
+    def remove_policy(self) -> None:
+        """Detach the currently attached policy instance.
+
+        Notes
+        -----
+        If ``policy_cls`` is configured, the policy can be lazily re-created
+        on the next :meth:`predict` call.
+        """
+        self._policy = None
+
+    def has_policy_factory(self) -> bool:
+        """Return whether this option can lazily construct its policy."""
+        return self._policy_cls is not None
+
+    def ensure_policy_initialized(self) -> SupportsPredict[ObsType, ActType]:
+        """Instantiate policy lazily if needed and return it."""
+        if self._policy is None:
+            if self._policy_cls is None:
+                raise RuntimeError(
+                    "No policy is attached to this option. "
+                    "Set option.policy or provide policy_cls/policy_kwargs."
+                )
+            self._policy = self._policy_cls(**self._policy_kwargs)
+        return self._policy
 
     def initiation_set(self, obs: ObsType) -> bool:
         """Check whether option is available in the current state.
@@ -122,10 +159,6 @@ class BaseOption(Generic[ObsType, ActType]):
         RuntimeError
             If no policy has been attached.
         """
-        if self._policy is None:
-            raise RuntimeError(
-                "No policy is attached to this option. Set option.policy before predict()."
-            )
-
-        prediction = self._policy.predict(obs, deterministic=deterministic)[0]
+        policy = self.ensure_policy_initialized()
+        prediction = policy.predict(obs, deterministic=deterministic)[0]
         return prediction

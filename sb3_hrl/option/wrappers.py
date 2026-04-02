@@ -287,10 +287,13 @@ class MetaControllerEnvWrapper(
         terminated: bool = False
         truncated: bool = False
         option_terminated: bool = False
+        option_truncated: bool = False
         last_info: dict[str, Any] = {}
         primitive_transitions: list[dict[str, Any]] = []
 
         while True:
+            if option.policy is None and option.has_policy_factory():
+                option.ensure_policy_initialized()
             primitive_action: ActType = option.predict(obs)
             next_obs, reward, terminated, truncated, step_info = self.env.step(
                 primitive_action
@@ -309,24 +312,24 @@ class MetaControllerEnvWrapper(
                         "action": copy.deepcopy(primitive_action),
                         "reward": float(reward),
                         "next_obs": copy.deepcopy(next_obs),
-                        "terminated": bool(terminated),
-                        "truncated": bool(truncated),
-                        "info": dict(step_info),
+                        "terminated": terminated,
+                        "truncated": truncated,
+                        "info": step_info,
                     }
                 )
 
             steps += 1
             self._episode_primitive_steps += 1
-            option_terminated = bool(option.termination_condition(next_obs))
+            option_terminated = option.termination_condition(next_obs)
+            option_truncated = steps >= self.max_option_steps
             obs: SB3ObsType = next_obs
             last_info: dict[str, Any] = dict(step_info)
 
-            if terminated or truncated or option_terminated:
+            if terminated or truncated or option_terminated or option_truncated:
                 break
-            if self.max_option_steps is not None and steps >= self.max_option_steps:
-                truncated = True
-                last_info.setdefault("TimeLimit.truncated", True)
-                break
+
+        if option_terminated or option_truncated:
+            option.remove_policy()
 
         self._last_obs = obs
         info = dict(last_info)
