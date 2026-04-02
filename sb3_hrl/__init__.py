@@ -9,10 +9,12 @@ from sb3_hrl.allo import (
 )
 from sb3_hrl.hiro import HIRO, HIROReplayBuffer, SubgoalProjectionWrapper
 from sb3_hrl.option import (
+    BaseIntrinsicReward,
     BaseOption,
     IntraOptionReplayBuffer,
     IntraOptionUpdateCallback,
-    MetaControllerEnvWrapper,
+    MetaControllerPrimitiveStepTimeLimitWrapper,
+    PrimitiveStepCountCallback,
     RandomOption,
     SubpolicyTrainingWrapper,
 )
@@ -26,10 +28,12 @@ __all__ = [
     "HRLMetaEnv",
     "train_subpolicies",
     "train_meta_policy",
+    "BaseIntrinsicReward",
     "BaseOption",
     "RandomOption",
-    "SubpolicyTrainingWrapper",
-    "MetaControllerEnvWrapper",
     "IntraOptionReplayBuffer",
     "IntraOptionUpdateCallback",
+    "MetaControllerPrimitiveStepTimeLimitWrapper",
+    "PrimitiveStepCountCallback",
+    "SubpolicyTrainingWrapper",
 ]
