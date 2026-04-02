@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from typing import Any, Literal, Optional
 
@@ -302,10 +303,10 @@ class MetaControllerEnvWrapper(
             if self.capture_primitive_transitions:
                 primitive_transitions.append(
                     {
-                        "obs": np.asarray(obs).copy(),
-                        "action": np.asarray(primitive_action).copy(),
+                        "obs": copy.deepcopy(obs),
+                        "action": copy.deepcopy(primitive_action),
                         "reward": float(reward),
-                        "next_obs": np.asarray(next_obs).copy(),
+                        "next_obs": copy.deepcopy(next_obs),
                         "terminated": bool(terminated),
                         "truncated": bool(truncated),
                         "info": dict(step_info),
@@ -314,7 +315,7 @@ class MetaControllerEnvWrapper(
 
             steps += 1
             option_terminated = bool(option.termination_condition(next_obs))
-            obs: SB3ObsType = np.asarray(next_obs)
+            obs: SB3ObsType = next_obs
             last_info: dict[str, Any] = dict(step_info)
 
             if terminated or truncated or option_terminated:
