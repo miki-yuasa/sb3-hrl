@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Generic, Optional
 
 from gymnasium.core import ActType, ObsType
+from stable_baselines3.common.base_class import BaseAlgorithm
 
 from sb3_hrl.typing import SupportsPredict
 
@@ -126,5 +127,5 @@ class BaseOption(Generic[ObsType, ActType]):
                 "No policy is attached to this option. Set option.policy before predict()."
             )
 
-        prediction = self._policy.predict(obs, deterministic=deterministic)
+        prediction = self._policy.predict(obs, deterministic=deterministic)[0]
         return prediction

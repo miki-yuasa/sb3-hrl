@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Generic, Protocol
+from typing import Any, Generic, Protocol
 
 import numpy as np
 from gymnasium.core import ActType, ObsType
@@ -15,7 +15,7 @@ class SupportsPredict(Protocol, Generic[ObsType, ActType]):
         state: tuple[np.ndarray, ...] | None = None,
         episode_start: np.ndarray | None = None,
         deterministic: bool = False,
-    ) -> ActType:
+    ) -> tuple[ActType, Any]:
         """Return action and optional policy state."""
         ...
 
