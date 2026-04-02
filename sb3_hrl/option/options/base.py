@@ -47,16 +47,18 @@ class BaseOption(ABC, Generic[ObsType, ActType]):
         actions through :meth:`predict`.
     """
 
-    def __init__(self, policy: Optional[SupportsPredict] = None) -> None:
-        self._policy: Optional[SupportsPredict] = policy
+    def __init__(
+        self, policy: Optional[SupportsPredict[ObsType, ActType]] = None
+    ) -> None:
+        self._policy: Optional[SupportsPredict[ObsType, ActType]] = policy
 
     @property
-    def policy(self) -> Optional[SupportsPredict]:
+    def policy(self) -> Optional[SupportsPredict[ObsType, ActType]]:
         """Attached policy model used for primitive action selection."""
         return self._policy
 
     @policy.setter
-    def policy(self, model: Optional[SupportsPredict]) -> None:
+    def policy(self, model: Optional[SupportsPredict[ObsType, ActType]]) -> None:
         """Attach or detach a trained policy model."""
         self._policy = model
 
@@ -84,8 +86,7 @@ class BaseOption(ABC, Generic[ObsType, ActType]):
             Current observation.
 
         Returns
-        -------
-        bool
+        -------        bool
             ``True`` when the option should stop.
         """
         return False
@@ -126,6 +127,4 @@ class BaseOption(ABC, Generic[ObsType, ActType]):
             )
 
         prediction = self._policy.predict(obs, deterministic=deterministic)
-        if isinstance(prediction, tuple):
-            return prediction[0]
         return prediction
