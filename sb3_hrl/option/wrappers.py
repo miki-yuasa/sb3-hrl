@@ -181,7 +181,7 @@ class OptionEnvWrapper(
             List of accumulated frames if render_mode is 'rgb_array_list',
             otherwise the current frame from the wrapped environment.
         """
-        if getattr(self, "render_mode", None) == "rgb_array_list":
+        if self.render_mode == "rgb_array_list":
             return self.pop_render_frames()
         return self.env.render()
 

@@ -7,7 +7,6 @@ from pprint import pprint
 from typing import Any
 
 import imageio
-import numpy as np
 from gymnasium import Env
 from stable_baselines3.common.base_class import BaseAlgorithm
 
@@ -57,11 +56,6 @@ def record_option_replay(
             rewards.append(float(reward))
 
             step_frames: list[Any] | None = info.get("render_frames")
-            if step_frames is None:
-                pop_fn = getattr(demo_env, "pop_render_frames", None)
-                if callable(pop_fn):
-                    step_frames = pop_fn()
-
             if step_frames:
                 frames.extend(step_frames)
                 step_primitive_steps = len(step_frames)

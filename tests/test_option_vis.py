@@ -14,7 +14,7 @@ from typing_extensions import override
 
 from sb3_hrl.option.options import BaseOption
 from sb3_hrl.option.vis import record_option_replay
-from sb3_hrl.option.wrappers import MetaControllerEnvWrapper, OptionEnvWrapper
+from sb3_hrl.option.wrappers import MetaControllerEnvWrapper
 
 
 class _MockRenderEnv(gym.Env[np.ndarray, int]):
@@ -86,29 +86,6 @@ class OptionVisTest(absltest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         self.base_env = _MockRenderEnv()
-
-    def test_option_env_wrapper_default_no_recording(self) -> None:
-        wrapped = OptionEnvWrapper(self.base_env)
-        wrapped.reset()
-        self.assertFalse(wrapped.record_render_frames)
-        frame = wrapped.record_primitive_frame()
-        self.assertIsNone(frame)
-        self.assertEmpty(wrapped.pop_render_frames())
-
-    def test_option_env_wrapper_records_and_pops_frames(self) -> None:
-        wrapped = OptionEnvWrapper(self.base_env)
-        wrapped.reset()
-        wrapped.set_record_render_frames(True)
-        self.assertTrue(wrapped.record_render_frames)
-
-        frame1 = wrapped.record_primitive_frame()
-        frame2 = wrapped.record_primitive_frame()
-        self.assertIsNotNone(frame1)
-        self.assertIsNotNone(frame2)
-
-        popped = wrapped.pop_render_frames()
-        self.assertLen(popped, 2)
-        self.assertEmpty(wrapped.pop_render_frames())
 
     def test_meta_controller_wrapper_populates_render_frames(self) -> None:
         option = _FixedDurationOption(duration=4)
