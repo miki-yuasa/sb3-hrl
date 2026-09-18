@@ -9,9 +9,11 @@ from .options import (
     RandomOption,
 )
 from .policies import PrimitiveStepPPO
+from .vis import record_option_replay
 from .wrappers import (
     MetaControllerEnvWrapper,
     MetaControllerPrimitiveStepTimeLimitWrapper,
+    OptionEnvWrapper,
     PrimitiveStepTimeLimit,
     SubpolicyTrainingWrapper,
 )
@@ -19,13 +21,15 @@ from .wrappers import (
 __all__ = [
     "BaseIntrinsicReward",
     "BaseOption",
-    "RandomOption",
-    "SubpolicyTrainingWrapper",
-    "MetaControllerEnvWrapper",
-    "PrimitiveStepTimeLimit",
-    "MetaControllerPrimitiveStepTimeLimitWrapper",
-    "PrimitiveStepCountCallback",
-    "PrimitiveStepPPO",
     "IntraOptionReplayBuffer",
     "IntraOptionUpdateCallback",
+    "MetaControllerEnvWrapper",
+    "MetaControllerPrimitiveStepTimeLimitWrapper",
+    "OptionEnvWrapper",
+    "PrimitiveStepCountCallback",
+    "PrimitiveStepPPO",
+    "PrimitiveStepTimeLimit",
+    "RandomOption",
+    "SubpolicyTrainingWrapper",
+    "record_option_replay",
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any, Generic, Optional
+from typing import Any, Generic
 
 from gymnasium.core import ActType, ObsType
 
@@ -32,7 +32,6 @@ class BaseIntrinsicReward(ABC, Generic[ObsType, ActType]):
 
     def reset_execution_state(self) -> None:
         """Reset internal state at episode/option boundaries."""
-        pass
 
 
 class BaseOption(Generic[ObsType, ActType]):
@@ -54,24 +53,24 @@ class BaseOption(Generic[ObsType, ActType]):
 
     def __init__(
         self,
-        policy: Optional[SupportsPredict[ObsType, ActType]] = None,
-        policy_cls: Optional[type[SupportsPredict[ObsType, ActType]]] = None,
+        policy: SupportsPredict[ObsType, ActType] | None = None,
+        policy_cls: type[SupportsPredict[ObsType, ActType]] | None = None,
         policy_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         if policy is not None and policy_cls is not None:
             raise ValueError("Provide either policy or policy_cls, not both.")
 
-        self._policy: Optional[SupportsPredict[ObsType, ActType]] = policy
-        self._policy_cls: Optional[type[SupportsPredict[ObsType, ActType]]] = policy_cls
+        self._policy: SupportsPredict[ObsType, ActType] | None = policy
+        self._policy_cls: type[SupportsPredict[ObsType, ActType]] | None = policy_cls
         self._policy_kwargs: dict[str, Any] = dict(policy_kwargs or {})
 
     @property
-    def policy(self) -> Optional[SupportsPredict[ObsType, ActType]]:
+    def policy(self) -> SupportsPredict[ObsType, ActType] | None:
         """Attached policy model used for primitive action selection."""
         return self._policy
 
     @policy.setter
-    def policy(self, model: Optional[SupportsPredict[ObsType, ActType]]) -> None:
+    def policy(self, model: SupportsPredict[ObsType, ActType] | None) -> None:
         """Attach or detach a trained policy model."""
         self._policy = model
 
@@ -136,8 +135,6 @@ class BaseOption(Generic[ObsType, ActType]):
         -----
         Stateless options can keep the default implementation.
         """
-
-        pass
 
     def predict(self, obs: ObsType, deterministic: bool = True) -> ActType:
         """Query the attached policy for a primitive action.

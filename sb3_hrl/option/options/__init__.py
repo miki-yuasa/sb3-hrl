@@ -5,7 +5,7 @@ from .random_option import RandomOption
 __all__ = [
     "BaseIntrinsicReward",
     "BaseOption",
-    "RandomOption",
     "IntraOptionReplayBuffer",
     "IntraOptionUpdateCallback",
+    "RandomOption",
 ]

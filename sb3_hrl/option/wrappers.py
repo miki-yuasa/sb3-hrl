@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
-from typing import Any, Literal, Optional, SupportsFloat, cast
+from typing import Any, Generic, Literal, SupportsFloat, cast
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import Wrapper, spaces
-from gymnasium.core import ActType, ObsType
+from gymnasium.core import (
+    ActType,
+    ObsType,
+    RenderFrame,
+    WrapperActType,
+    WrapperObsType,
+)
 from gymnasium.utils import RecordConstructorArgs
+from typing_extensions import override
 
 from sb3_hrl.typing import SB3ObsType
 
@@ -49,7 +56,7 @@ class SubpolicyTrainingWrapper(
         env: gym.Env,
         intrinsic_reward_cls: type[BaseIntrinsicReward[ObsType, ActType]],
         intrinsic_reward_args: dict[str, Any] | None = None,
-        termination_condition: Optional[Callable[[ObsType], bool]] = None,
+        termination_condition: Callable[[ObsType], bool] | None = None,
     ) -> None:
         RecordConstructorArgs.__init__(
             self,
@@ -58,7 +65,7 @@ class SubpolicyTrainingWrapper(
             termination_condition=termination_condition,
         )
         Wrapper.__init__(self, env)
-        self._last_obs: Optional[ObsType] = None
+        self._last_obs: ObsType | None = None
 
         self._intrinsic_reward: BaseIntrinsicReward[ObsType, ActType] = (
             intrinsic_reward_cls(**(intrinsic_reward_args or {}))
@@ -107,8 +114,80 @@ class SubpolicyTrainingWrapper(
         return next_obs, intrinsic, forced_terminated, truncated, info
 
 
+class OptionEnvWrapper(
+    Wrapper[WrapperObsType, WrapperActType, ObsType, ActType],
+    Generic[WrapperObsType, WrapperActType, ObsType, ActType],
+):
+    """A base gymnasium wrapper for macro-step option environments.
+
+    Manages intermediate primitive frame recording across subpolicy execution.
+
+    Attributes:
+        record_render_frames: Whether to record frames during primitive steps.
+    """
+
+    def __init__(self, env: gym.Env[ObsType, ActType]) -> None:
+        """Initializes OptionEnvWrapper.
+
+        Args:
+            env: The underlying environment to wrap.
+        """
+        super().__init__(env)
+        self.record_render_frames: bool = False
+        self._render_frames: list[Any] = []
+
+    def set_record_render_frames(self, enabled: bool = True) -> None:
+        """Enables or disables intermediate primitive frame recording.
+
+        Args:
+            enabled: Whether to enable frame recording.
+        """
+        self.record_render_frames = enabled
+
+    def record_primitive_frame(self) -> Any:
+        """Captures and buffers the current primitive frame if recording is enabled.
+
+        Returns:
+            The rendered frame if recording is active, otherwise None.
+        """
+        if not self.record_render_frames:
+            return None
+        frame = self.env.render()
+        if isinstance(frame, list):
+            self._render_frames.extend(frame)
+        elif frame is not None:
+            self._render_frames.append(frame)
+        return frame
+
+    def pop_render_frames(self) -> list[Any]:
+        """Returns and clears all buffered primitive frames since the last call.
+
+        Returns:
+            List of accumulated frame arrays.
+        """
+        frames = list(self._render_frames)
+        self._render_frames.clear()
+        return frames
+
+    def reset_render_frames(self) -> None:
+        """Clears accumulated render frames without returning them."""
+        self._render_frames.clear()
+
+    @override
+    def render(self) -> RenderFrame | list[RenderFrame] | None:
+        """Renders environment frames according to configured render_mode.
+
+        Returns:
+            List of accumulated frames if render_mode is 'rgb_array_list',
+            otherwise the current frame from the wrapped environment.
+        """
+        if getattr(self, "render_mode", None) == "rgb_array_list":
+            return self.pop_render_frames()
+        return self.env.render()
+
+
 class MetaControllerEnvWrapper(
-    Wrapper[SB3ObsType, int, SB3ObsType, ActType],
+    OptionEnvWrapper[SB3ObsType, int, SB3ObsType, ActType],
     RecordConstructorArgs,
 ):
     """Wrap an env so high-level actions select options.
@@ -154,7 +233,7 @@ class MetaControllerEnvWrapper(
         invalid_option_penalty: float = -1.0,
         include_random_option: bool = True,
         random_option_termination_steps: int = 1,
-        capture_primitive_transitions: Optional[bool] = None,
+        capture_primitive_transitions: bool | None = None,
         max_option_steps: int = 50,
         include_step_count_in_obs: bool = False,
     ) -> None:
@@ -171,7 +250,7 @@ class MetaControllerEnvWrapper(
             max_option_steps=max_option_steps,
             include_step_count_in_obs=include_step_count_in_obs,
         )
-        Wrapper.__init__(self, env)
+        OptionEnvWrapper.__init__(self, env)
         if reward_type not in {"smdp", "intra_option"}:
             raise ValueError("reward_type must be 'smdp' or 'intra_option'.")
         if not (0.0 <= gamma <= 1.0):
@@ -250,6 +329,7 @@ class MetaControllerEnvWrapper(
 
     def reset(self, **kwargs: Any) -> tuple[SB3ObsType, dict[str, Any]]:
         """Reset wrapped env and internal observation cache."""
+        self.reset_render_frames()
         obs, info = self.env.reset(**kwargs)
         self._last_obs = obs
         self._episode_primitive_steps = 0
@@ -257,6 +337,7 @@ class MetaControllerEnvWrapper(
 
     def step(self, action: int) -> tuple[SB3ObsType, float, bool, bool, dict[str, Any]]:
         """Execute one selected option and return one macro transition."""
+        self.reset_render_frames()
         if self._last_obs is None:
             raise RuntimeError(
                 "Call reset() before step() in MetaControllerEnvWrapper."
@@ -277,6 +358,8 @@ class MetaControllerEnvWrapper(
             }
             if self.capture_primitive_transitions:
                 info["primitive_transitions"] = []
+            if self.record_render_frames:
+                info["render_frames"] = []
             return current_obs, self.invalid_option_penalty, False, False, info
 
         option.reset_execution_state()
@@ -298,6 +381,7 @@ class MetaControllerEnvWrapper(
             next_obs, reward, terminated, truncated, step_info = self.env.step(
                 primitive_action
             )
+            self.record_primitive_frame()
 
             if self.reward_type == "smdp":
                 total_reward += effective_gamma * float(reward)
@@ -342,6 +426,8 @@ class MetaControllerEnvWrapper(
         info["reward_type"] = self.reward_type
         if self.capture_primitive_transitions:
             info["primitive_transitions"] = primitive_transitions
+        if self.record_render_frames:
+            info["render_frames"] = self.pop_render_frames()
 
         return obs, float(total_reward), bool(terminated), bool(truncated), info
 
@@ -479,7 +565,7 @@ class MetaControllerPrimitiveStepTimeLimitWrapper(
         invalid_option_penalty: float = -1.0,
         include_random_option: bool = True,
         random_option_termination_steps: int = 1,
-        capture_primitive_transitions: Optional[bool] = None,
+        capture_primitive_transitions: bool | None = None,
         max_option_steps: int = 50,
         include_step_count_in_obs: bool = False,
     ) -> None:
@@ -529,6 +615,6 @@ class MetaControllerPrimitiveStepTimeLimitWrapper(
 
 
 __all__ = [
-    "SubpolicyTrainingWrapper",
     "MetaControllerEnvWrapper",
+    "SubpolicyTrainingWrapper",
 ]

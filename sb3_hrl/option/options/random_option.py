@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from gymnasium import spaces
 
@@ -27,7 +28,7 @@ class RandomOption(BaseOption):
         self,
         action_space: spaces.Space,
         termination_steps: int = 1,
-        initiation_fn: Optional[Callable[[Any], bool]] = None,
+        initiation_fn: Callable[[Any], bool] | None = None,
     ) -> None:
         super().__init__(policy=None)
         if termination_steps <= 0:

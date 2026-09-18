@@ -52,7 +52,7 @@ custom intra-option updates.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from gymnasium import spaces
@@ -116,7 +116,7 @@ class IntraOptionReplayBuffer(ReplayBuffer):
     def get_primitive_traces(
         self,
         indices: np.ndarray,
-        env_indices: Optional[np.ndarray] = None,
+        env_indices: np.ndarray | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Return primitive traces for sampled replay entries.
 
