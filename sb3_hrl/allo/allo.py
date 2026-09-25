@@ -56,7 +56,6 @@ meta-environment logic are implemented in sibling modules.
 
 from __future__ import annotations
 
-import importlib
 from typing import Optional, Union, cast
 
 import numpy as np
@@ -303,6 +302,10 @@ class ALLO(BaseAlgorithm):
         self._lag_probs = lag_weights / np.sum(lag_weights)
 
         self._allo_last_obs: Optional[Union[np.ndarray, dict[str, np.ndarray]]] = None
+        self._gpu_obs: Optional[th.Tensor] = None
+        self._gpu_next_obs: Optional[th.Tensor] = None
+        self._th_lag_values: Optional[th.Tensor] = None
+        self._th_lag_probs: Optional[th.Tensor] = None
 
         if _init_setup_model:
             self._setup_model()
@@ -320,6 +323,9 @@ class ALLO(BaseAlgorithm):
         None
             Allocates internal model, optimizer, and constrained variables.
         """
+        if th.cuda.is_available() and "cuda" in str(self.device):
+            th.set_float32_matmul_precision("high")
+
         self._flat_obs_space = space_utils.flatten_space(self.observation_space)
         if not isinstance(self._flat_obs_space, spaces.Box):
             raise TypeError("ALLO requires a flattenable Box observation space.")
@@ -335,6 +341,11 @@ class ALLO(BaseAlgorithm):
             n_envs=self.n_envs,
         )
 
+        self._th_lag_values = th.as_tensor(self._lag_values, device=self.device)
+        self._th_lag_probs = th.as_tensor(
+            self._lag_probs, dtype=th.float32, device=self.device
+        )
+
         self._setup_lr_schedule()
         self.policy = self.policy_class(
             self.observation_space,
@@ -347,9 +358,8 @@ class ALLO(BaseAlgorithm):
             feature_dim=self.representation_dim,
             hidden_dims=self.hidden_dims,
         ).to(self.device)
-        lr_value = self.learning_rate
-        learning_rate = float(lr_value(1.0)) if callable(lr_value) else float(lr_value)
-        self.optimizer = th.optim.Adam(self.feature_net.parameters(), lr=learning_rate)
+        initial_lr = float(self.lr_schedule(1.0))
+        self.optimizer = th.optim.Adam(self.feature_net.parameters(), lr=initial_lr)
 
         shape = (self.representation_dim, self.representation_dim)
         self.dual_variables = th.zeros(shape, dtype=th.float32, device=self.device)
@@ -358,8 +368,50 @@ class ALLO(BaseAlgorithm):
             th.ones(shape, dtype=th.float32, device=self.device) * self.barrier_int
         )
 
+    def _setup_gpu_buffer(self) -> None:
+        """Cache replay buffer transitions on GPU if memory permits."""
+        if not (th.cuda.is_available() and "cuda" in str(self.device)):
+            self._gpu_obs = None
+            self._gpu_next_obs = None
+            return
+
+        size = self.replay_buffer.size()
+        if size <= 0:
+            return
+
+        # Observations are stored in replay buffer with shape [size, n_envs, obs_dim].
+        req_bytes = 2 * size * self.n_envs * self._obs_dim * 4
+        try:
+            device_idx = (
+                self.device.index
+                if isinstance(self.device, th.device) and self.device.index is not None
+                else 0
+            )
+            free_bytes = th.cuda.mem_get_info(device_idx)[0]
+            if req_bytes < free_bytes * 0.4:
+                obs_slice = self.replay_buffer.observations[:size]
+                next_obs_slice = self.replay_buffer.next_observations[:size]
+                self._gpu_obs = th.as_tensor(
+                    obs_slice, device=self.device, dtype=th.float32
+                ).reshape(-1, self._obs_dim)
+                self._gpu_next_obs = th.as_tensor(
+                    next_obs_slice, device=self.device, dtype=th.float32
+                ).reshape(-1, self._obs_dim)
+                if self.verbose >= 1:
+                    print(
+                        f"[ALLO] Replay buffer cached in GPU memory: "
+                        f"{req_bytes / (1024**2):.1f} MB "
+                        f"({size * self.n_envs} transitions)."
+                    )
+            else:
+                self._gpu_obs = None
+                self._gpu_next_obs = None
+        except Exception:
+            self._gpu_obs = None
+            self._gpu_next_obs = None
+
     def _excluded_save_params(self) -> list[str]:
-        """Exclude raw env handle from pickled data.
+        """Exclude raw env handle and GPU buffer caches from pickled data.
 
         Parameters
         ----------
@@ -371,7 +423,14 @@ class ALLO(BaseAlgorithm):
         list[str]
             Attribute names excluded from standard SB3 pickling.
         """
-        return [*super()._excluded_save_params(), "env"]
+        return [
+            *super()._excluded_save_params(),
+            "env",
+            "_gpu_obs",
+            "_gpu_next_obs",
+            "_th_lag_values",
+            "_th_lag_probs",
+        ]
 
     def _get_torch_save_params(self) -> tuple[list[str], list[str]]:
         """Return torch state objects used by SB3 save/load.
@@ -466,13 +525,20 @@ class ALLO(BaseAlgorithm):
             if not is_batched:
                 return self._flatten_single_observation(observations)[None, :]
 
-            flattened = []
-            for i in range(self.n_envs):
-                single_obs = {
-                    key: np.asarray(value)[i] for key, value in observations.items()
-                }
-                flattened.append(self._flatten_single_observation(single_obs))
-            return np.stack(flattened, axis=0)
+            keys = (
+                list(self.observation_space.spaces.keys())
+                if isinstance(self.observation_space, spaces.Dict)
+                else list(observations.keys())
+            )
+            return np.concatenate(
+                [
+                    np.asarray(observations[k])
+                    .reshape(self.n_envs, -1)
+                    .astype(np.float32, copy=False)
+                    for k in keys
+                ],
+                axis=-1,
+            )
 
         obs_array = np.asarray(observations)
         batch_size = obs_array.shape[0] if obs_array.ndim > self._obs_ndim else 1
@@ -562,6 +628,79 @@ class ALLO(BaseAlgorithm):
         second = self.replay_buffer.next_observations[second_indices, env_indices]
         return first, second
 
+    def _sample_batch_tensors(
+        self, batch_size: int
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        """Sample (s1, s2, uncorr1, uncorr2) state batches directly on device.
+
+        Uses fast GPU memory when available for sub-millisecond tensor sampling,
+        with fallback to CPU numpy slicing.
+
+        Parameters
+        ----------
+        batch_size : int
+            Number of state samples per branch.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            Tensors (states_1, states_2, uncorr_1, uncorr_2) on self.device.
+        """
+        current_slots = self.replay_buffer.size()
+        if current_slots < max(self.pair_horizon + 1, 2):
+            raise RuntimeError("Not enough replay data to run ALLO training step.")
+
+        if (
+            self._gpu_obs is not None
+            and self._gpu_next_obs is not None
+            and self._th_lag_probs is not None
+            and self._th_lag_values is not None
+        ):
+            total_transitions = current_slots * self.n_envs
+            lag_indices = th.multinomial(
+                self._th_lag_probs, batch_size, replacement=True
+            )
+            lags = self._th_lag_values[lag_indices]
+
+            if self.replay_buffer.full:
+                first_slots = th.randint(
+                    0, current_slots, (batch_size,), device=self.device
+                )
+                second_slots = (first_slots + lags) % current_slots
+            else:
+                max_lag = int(self.pair_horizon)
+                usable = max(current_slots - max_lag, 1)
+                first_slots = th.randint(0, usable, (batch_size,), device=self.device)
+                second_slots = th.minimum(
+                    first_slots + lags,
+                    th.as_tensor(current_slots - 1, device=self.device),
+                )
+
+            env_indices = th.randint(0, self.n_envs, (batch_size,), device=self.device)
+            idx1 = first_slots * self.n_envs + env_indices
+            idx2 = second_slots * self.n_envs + env_indices
+            u_idx1 = th.randint(0, total_transitions, (batch_size,), device=self.device)
+            u_idx2 = th.randint(0, total_transitions, (batch_size,), device=self.device)
+
+            return (
+                self._gpu_obs[idx1],
+                self._gpu_next_obs[idx2],
+                self._gpu_obs[u_idx1],
+                self._gpu_obs[u_idx2],
+            )
+
+        # Fallback to CPU sampling
+        states_1_np, states_2_np = self._sample_discounted_pairs(batch_size)
+        uncorr_1_np = self._sample_uniform_states(batch_size)
+        uncorr_2_np = self._sample_uniform_states(batch_size)
+
+        return (
+            th.as_tensor(states_1_np, dtype=th.float32, device=self.device),
+            th.as_tensor(states_2_np, dtype=th.float32, device=self.device),
+            th.as_tensor(uncorr_1_np, dtype=th.float32, device=self.device),
+            th.as_tensor(uncorr_2_np, dtype=th.float32, device=self.device),
+        )
+
     def collect_random_transitions(
         self, num_steps: Optional[int] = None, progress_bar: bool = False
     ) -> None:
@@ -622,9 +761,7 @@ class ALLO(BaseAlgorithm):
                     [self.action_space.sample() for _ in range(self.n_envs)]
                 )
                 new_obs, rewards, dones, infos = self.env.step(actions)
-                obs_batch = self._flatten_vec_observations(
-                    cast(Union[np.ndarray, dict[str, np.ndarray]], self._allo_last_obs)
-                )
+                obs_batch = self._flatten_vec_observations(self._allo_last_obs)
                 next_obs_batch = self._flatten_vec_observations(
                     cast(Union[np.ndarray, dict[str, np.ndarray]], new_obs)
                 )
@@ -665,6 +802,7 @@ class ALLO(BaseAlgorithm):
                 pbar.close()
 
         size_after = self.replay_buffer.size()
+        self._setup_gpu_buffer()
 
         # Log collection stats when a logger is available; otherwise fall back to stdout.
         collected_slots = max(size_after - size_before, 0)
@@ -682,44 +820,31 @@ class ALLO(BaseAlgorithm):
             )
             self.logger.dump(step=size_after)
 
-    def train_step(self) -> dict[str, float]:
+    def train_step(self, record_metrics: bool = True) -> dict[str, float]:
         """Run one ALLO optimization step.
 
         Parameters
         ----------
-        None
-            Uses replay-buffer samples and model state.
+        record_metrics : bool, default=True
+            Whether to synchronize and return scalar loss metrics as floats.
+            Set to False on non-logging steps to avoid CPU-GPU synchronization stalls.
 
         Returns
         -------
         dict[str, float]
             Scalar diagnostics and loss components for logging.
         """
-        if self.replay_buffer.size() < max(self.batch_size, self.pair_horizon + 1):
-            raise RuntimeError("Not enough replay data to run ALLO training step.")
-
-        states_1_np, states_2_np = self._sample_discounted_pairs(self.batch_size)
-        uncorr_1_np = self._sample_uniform_states(self.batch_size)
-        uncorr_2_np = self._sample_uniform_states(self.batch_size)
-
-        # Convert all numpy arrays to tensors at once
-        states_1, states_2, uncorr_1, uncorr_2 = self._numpy_to_torch(
-            (
-                self._flatten_vec_observations(states_1_np),
-                self._flatten_vec_observations(states_2_np),
-                self._flatten_vec_observations(uncorr_1_np),
-                self._flatten_vec_observations(uncorr_2_np),
-            )
+        states_1, states_2, uncorr_1, uncorr_2 = self._sample_batch_tensors(
+            self.batch_size
         )
 
-        # Compute features for graph loss (temporal smoothness)
-        phi_1 = self.feature_net(states_1)
-        phi_2 = self.feature_net(states_2)
-        graph_loss = ((phi_1 - phi_2) ** 2).mean(dim=0).sum()
+        # Consolidated forward pass: evaluate all 4 states in a single batched kernel
+        all_states = th.cat([states_1, states_2, uncorr_1, uncorr_2], dim=0)
+        phi_all = self.feature_net(all_states)
+        phi_1, phi_2, phi_unc_1, phi_unc_2 = phi_all.chunk(4, dim=0)
 
-        # Compute features for orthogonality constraints
-        phi_unc_1 = self.feature_net(uncorr_1)
-        phi_unc_2 = self.feature_net(uncorr_2)
+        # Compute features for graph loss (temporal smoothness)
+        graph_loss = ((phi_1 - phi_2) ** 2).mean(dim=0).sum()
 
         # Compute constraint error matrices
         norm = float(self.batch_size)
@@ -734,10 +859,11 @@ class ALLO(BaseAlgorithm):
 
         # Compute dual and barrier losses
         dual_loss = (self.dual_variables.detach() * e).sum()
-        barrier_loss = (self._get_barrier_coeff() * e_quad).sum()
+        barrier_scalar = self._get_barrier_coeff()
+        barrier_loss = (barrier_scalar * e_quad).sum()
         total_loss = graph_loss + dual_loss + barrier_loss
 
-        # Network update
+        # Network update: single consolidated backward pass
         self.optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
         th.nn.utils.clip_grad_norm_(self.feature_net.parameters(), self.grad_clip_norm)
@@ -745,7 +871,6 @@ class ALLO(BaseAlgorithm):
 
         # Update dual variables and barrier coefficients
         with th.no_grad():
-            barrier_scalar = self._get_barrier_coeff()
             effective_lr = self.lr_duals * (
                 1.0 + float(self.use_barrier_for_duals) * (barrier_scalar - 1.0)
             )
@@ -773,14 +898,17 @@ class ALLO(BaseAlgorithm):
                 )
             )
 
-        return {
-            "loss/total": float(total_loss.item()),
-            "loss/graph": float(graph_loss.item()),
-            "loss/dual": float(dual_loss.item()),
-            "loss/barrier": float(barrier_loss.item()),
-            "diagnostics/barrier_coeff": barrier_scalar,
-            "diagnostics/mean_constraint": float(e.abs().mean().item()),
-        }
+        if record_metrics:
+            return {
+                "loss/total": float(total_loss.item()),
+                "loss/graph": float(graph_loss.item()),
+                "loss/dual": float(dual_loss.item()),
+                "loss/barrier": float(barrier_loss.item()),
+                "diagnostics/barrier_coeff": float(barrier_scalar),
+                "diagnostics/mean_constraint": float(e.abs().mean().item()),
+            }
+
+        return {}
 
     def learn(
         self,
@@ -835,6 +963,9 @@ class ALLO(BaseAlgorithm):
                     "`auto_collect_if_needed=True`."
                 )
 
+        if self._gpu_obs is None and self.replay_buffer.size() > 0:
+            self._setup_gpu_buffer()
+
         total_epochs = int(total_timesteps)
         callback_total_timesteps = total_epochs
 
@@ -849,7 +980,6 @@ class ALLO(BaseAlgorithm):
         callback.on_training_start(locals(), globals())
 
         if self.replay_buffer.size() < max(self.batch_size, self.pair_horizon + 1):
-            # Show the values of replay_buffer.size(), batch_size and pair_horizon for debugging
             raise RuntimeError(
                 f"Not enough replay data to run ALLO training step. "
                 f"Replay buffer size: {self.replay_buffer.size()}, "
@@ -857,11 +987,22 @@ class ALLO(BaseAlgorithm):
                 "Needs at least max(batch_size, pair_horizon + 1) transitions in the replay buffer."
             )
 
+        metric_record_interval = min(max(log_interval, 1), 100)
+        stats: dict[str, float] = {}
+
         for iteration in range(1, total_epochs + 1):
+            should_record = (
+                (metric_record_interval > 0 and iteration % metric_record_interval == 0)
+                or iteration == 1
+                or iteration == total_epochs
+            )
             for _ in range(self.gradient_steps):
-                stats = self.train_step()
-                for key, value in stats.items():
-                    self.logger.record(key, value)
+                step_stats = self.train_step(record_metrics=should_record)
+                if step_stats:
+                    stats = step_stats
+                    if log_interval > 0 and iteration % log_interval == 0:
+                        for key, value in stats.items():
+                            self.logger.record(key, value)
 
             # In offline ALLO, one outer iteration corresponds to one configured
             # training timestep (epoch), independent of vec-env parallelism.

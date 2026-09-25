@@ -2,12 +2,16 @@
 
 from .allo import ALLO
 from .training import train_meta_policy, train_subpolicies
+from .utils import ALLOCheckpointCallback, ALLOProgressBarCallback, LossEvalCallback
 from .wrappers import HRLMetaEnv, LaplacianRewardWrapper
 
 __all__ = [
     "ALLO",
-    "LaplacianRewardWrapper",
+    "ALLOCheckpointCallback",
+    "ALLOProgressBarCallback",
     "HRLMetaEnv",
-    "train_subpolicies",
+    "LaplacianRewardWrapper",
+    "LossEvalCallback",
     "train_meta_policy",
+    "train_subpolicies",
 ]

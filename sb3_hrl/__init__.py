@@ -2,8 +2,11 @@
 
 from sb3_hrl.allo import (
     ALLO,
+    ALLOCheckpointCallback,
+    ALLOProgressBarCallback,
     HRLMetaEnv,
     LaplacianRewardWrapper,
+    LossEvalCallback,
     train_meta_policy,
     train_subpolicies,
 )
@@ -25,7 +28,10 @@ __all__ = [
     "HIROReplayBuffer",
     "SubgoalProjectionWrapper",
     "ALLO",
+    "ALLOCheckpointCallback",
+    "ALLOProgressBarCallback",
     "LaplacianRewardWrapper",
+    "LossEvalCallback",
     "HRLMetaEnv",
     "train_subpolicies",
     "train_meta_policy",
