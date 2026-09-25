@@ -6,9 +6,38 @@ import os
 from pathlib import Path
 from typing import Any
 
+import gymnasium as gym
 import numpy as np
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from gymnasium import spaces
+from stable_baselines3.common.callbacks import (
+    BaseCallback,
+    CheckpointCallback,
+    EvalCallback,
+)
+from stable_baselines3.common.vec_env import DummyVecEnv
 from tqdm.rich import tqdm
+
+
+class _DummyLossEvalEnv(gym.Env[np.ndarray, int]):
+    """Minimal dummy environment satisfying VecEnv interface for LossEvalCallback."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.action_space = spaces.Discrete(1)
+        self.observation_space = spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        super().reset(seed=seed)
+        return np.zeros((1,), dtype=np.float32), {}
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        del action
+        return np.zeros((1,), dtype=np.float32), 0.0, True, False, {}
 
 
 class ALLOProgressBarCallback(BaseCallback):
@@ -41,7 +70,7 @@ class ALLOProgressBarCallback(BaseCallback):
         self.pbar.close()
 
 
-class LossEvalCallback(BaseCallback):
+class LossEvalCallback(EvalCallback):
     """Evaluation callback that tracks representation loss and saves the best model.
 
     Evaluates the offline representation loss rather than external environment
@@ -77,13 +106,34 @@ class LossEvalCallback(BaseCallback):
         verbose: int = 1,
         **kwargs: Any,
     ) -> None:
-        super().__init__(verbose=verbose)
-        del eval_env, kwargs
-        self.best_model_save_path = (
+        if eval_env is None:
+            eval_env = DummyVecEnv([_DummyLossEvalEnv])
+        super().__init__(
+            eval_env=eval_env,
+            best_model_save_path=str(best_model_save_path)
+            if best_model_save_path is not None
+            else None,
+            log_path=str(log_path) if log_path is not None else None,
+            eval_freq=eval_freq,
+            verbose=verbose,
+            **{
+                k: v
+                for k, v in kwargs.items()
+                if k
+                in {
+                    "callback_on_new_best",
+                    "callback_after_eval",
+                    "n_eval_episodes",
+                    "deterministic",
+                    "render",
+                    "warn",
+                }
+            },
+        )
+        self.loss_best_model_save_path = (
             Path(best_model_save_path) if best_model_save_path is not None else None
         )
-        self.log_path = Path(log_path) if log_path is not None else None
-        self.eval_freq = int(eval_freq)
+        self.loss_log_path = Path(log_path) if log_path is not None else None
         self.metric = str(metric)
         self.best_loss = float("inf")
         self.last_eval_timesteps = 0
@@ -153,17 +203,17 @@ class LossEvalCallback(BaseCallback):
                 )
             self.best_loss = loss_val
 
-            if self.best_model_save_path is not None:
-                self.best_model_save_path.mkdir(parents=True, exist_ok=True)
-                save_dest = self.best_model_save_path / "best_model"
+            if self.loss_best_model_save_path is not None:
+                self.loss_best_model_save_path.mkdir(parents=True, exist_ok=True)
+                save_dest = self.loss_best_model_save_path / "best_model"
                 self.model.save(str(save_dest))
                 if self.verbose >= 1:
                     print(f"Saved new best model to {save_dest}.zip")
 
-        if self.log_path is not None:
-            self.log_path.mkdir(parents=True, exist_ok=True)
+        if self.loss_log_path is not None:
+            self.loss_log_path.mkdir(parents=True, exist_ok=True)
             np.savez(
-                self.log_path / "evaluations.npz",
+                self.loss_log_path / "evaluations.npz",
                 timesteps=np.asarray(self._evaluations_timesteps, dtype=np.int64),
                 losses=np.asarray(self._evaluations_losses, dtype=np.float32),
             )
