@@ -464,10 +464,7 @@ class ALLO(BaseAlgorithm):
         np.ndarray
             Flattened 1D observation of shape ``[obs_dim]``.
         """
-        if isinstance(observation, dict):
-            flat = space_utils.flatten(self.observation_space, observation)
-        else:
-            flat = observation.reshape(-1)
+        flat = space_utils.flatten(self.observation_space, observation)
         return np.asarray(flat, dtype=np.float32)
 
     def _numpy_to_torch(
@@ -525,25 +522,68 @@ class ALLO(BaseAlgorithm):
             if not is_batched:
                 return self._flatten_single_observation(observations)[None, :]
 
-            keys = (
-                list(self.observation_space.spaces.keys())
+            n = self.n_envs
+            parts: list[np.ndarray] = []
+            dict_spaces = (
+                self.observation_space.spaces
                 if isinstance(self.observation_space, spaces.Dict)
-                else list(observations.keys())
+                else {}
             )
-            return np.concatenate(
-                [
-                    np.asarray(observations[k])
-                    .reshape(self.n_envs, -1)
-                    .astype(np.float32, copy=False)
-                    for k in keys
-                ],
-                axis=-1,
+            keys = (
+                list(dict_spaces.keys()) if dict_spaces else list(observations.keys())
             )
+            for k in keys:
+                v = np.asarray(observations[k])
+                s = dict_spaces.get(k)
+                if s is None or isinstance(s, (spaces.Box, spaces.MultiBinary)):
+                    parts.append(v.reshape(n, -1).astype(np.float32, copy=False))
+                elif isinstance(s, spaces.MultiDiscrete):
+                    nvec = s.nvec.flatten()
+                    total_dims = int(np.sum(nvec))
+                    offsets = np.zeros((len(nvec),), dtype=np.int64)
+                    offsets[1:] = np.cumsum(nvec[:-1])
+                    start = np.asarray(s.start).flatten()
+                    x = (v.reshape(n, -1) - start) + offsets
+                    onehot = np.zeros((n, total_dims), dtype=np.float32)
+                    row_idx = np.arange(n)[:, None]
+                    onehot[row_idx, x] = 1.0
+                    parts.append(onehot)
+                elif isinstance(s, spaces.Discrete):
+                    onehot = np.zeros((n, s.n), dtype=np.float32)
+                    onehot[np.arange(n), v.reshape(-1) - s.start] = 1.0
+                    parts.append(onehot)
+                else:
+                    parts.append(
+                        np.stack(
+                            [np.asarray(space_utils.flatten(s, v[i])) for i in range(n)]
+                        ).astype(np.float32, copy=False)
+                    )
+            return np.concatenate(parts, axis=-1)
 
         obs_array = np.asarray(observations)
         batch_size = obs_array.shape[0] if obs_array.ndim > self._obs_ndim else 1
         if obs_array.ndim == self._obs_ndim:
             obs_array = obs_array[None, ...]
+
+        if isinstance(self.observation_space, spaces.MultiDiscrete):
+            nvec = self.observation_space.nvec.flatten()
+            total_dims = int(np.sum(nvec))
+            offsets = np.zeros((len(nvec),), dtype=np.int64)
+            offsets[1:] = np.cumsum(nvec[:-1])
+            start = np.asarray(self.observation_space.start).flatten()
+            x = (obs_array.reshape(batch_size, -1) - start) + offsets
+            onehot = np.zeros((batch_size, total_dims), dtype=np.float32)
+            row_idx = np.arange(batch_size)[:, None]
+            onehot[row_idx, x] = 1.0
+            return onehot
+        elif isinstance(self.observation_space, spaces.Discrete):
+            onehot = np.zeros((batch_size, self.observation_space.n), dtype=np.float32)
+            onehot[
+                np.arange(batch_size),
+                obs_array.reshape(-1) - self.observation_space.start,
+            ] = 1.0
+            return onehot
+
         return obs_array.reshape(batch_size, -1).astype(np.float32, copy=False)
 
     def encode(

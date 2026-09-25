@@ -7,6 +7,7 @@ import gymnasium as gym
 import numpy as np
 from absl.testing import absltest, parameterized
 from gymnasium import spaces
+from gymnasium.spaces import utils as space_utils
 
 from sb3_hrl.allo import (
     ALLO,
@@ -83,6 +84,46 @@ class _DummyDictEnv(gym.Env[dict[str, np.ndarray], int]):
         return obs, 0.0, False, False, {}
 
 
+class _DummyComplexDictEnv(gym.Env[dict[str, np.ndarray], int]):
+    metadata = {"render_modes": []}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.observation_space = spaces.Dict(
+            {
+                "box": spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+                "disc": spaces.Discrete(3),
+                "multidisc": spaces.MultiDiscrete([2, 2, 2, 2]),
+            }
+        )
+        self.action_space = spaces.Discrete(2)
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, object] | None = None,
+    ) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+        super().reset(seed=seed)
+        obs = {
+            "box": np.zeros((2,), dtype=np.float32),
+            "disc": np.array(1, dtype=np.int64),
+            "multidisc": np.array([0, 1, 0, 1], dtype=np.int64),
+        }
+        return obs, {}
+
+    def step(
+        self, action: int
+    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, object]]:
+        del action
+        obs = {
+            "box": np.zeros((2,), dtype=np.float32),
+            "disc": np.array(0, dtype=np.int64),
+            "multidisc": np.array([1, 0, 1, 0], dtype=np.int64),
+        }
+        return obs, 0.0, False, False, {}
+
+
 class ALLOTest(parameterized.TestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -110,6 +151,39 @@ class ALLOTest(parameterized.TestCase):
         self.assertEqual(flat.shape, (allo.n_envs, 5))
         np.testing.assert_allclose(flat[:, :2], 1.0)
         np.testing.assert_allclose(flat[:, 2:], 2.0)
+
+    def test_flatten_multidiscrete_and_discrete_spaces(self) -> None:
+        env = _DummyComplexDictEnv()
+        allo = ALLO(
+            env=env,
+            representation_dim=2,
+            buffer_size=100,
+            batch_size=16,
+            device="cpu",
+        )
+        batched_dict = {
+            "box": np.ones((allo.n_envs, 2), dtype=np.float32),
+            "disc": np.full((allo.n_envs,), 1, dtype=np.int64),
+            "multidisc": np.tile(
+                np.array([0, 1, 0, 1], dtype=np.int64), (allo.n_envs, 1)
+            ),
+        }
+        flat = allo._flatten_vec_observations(batched_dict)
+        # Expected flat dim: 2 (box) + 3 (disc one-hot) + 8 (multidisc 4*2 one-hot) = 13
+        self.assertEqual(flat.shape, (allo.n_envs, 13))
+        # Validate against space_utils.flatten
+        expected = np.stack(
+            [
+                np.asarray(
+                    space_utils.flatten(
+                        env.observation_space,
+                        {k: batched_dict[k][i] for k in batched_dict},
+                    )
+                )
+                for i in range(allo.n_envs)
+            ]
+        )
+        np.testing.assert_allclose(flat, expected)
 
     def test_train_step_batched_forward(self) -> None:
         env = _DummyBoxEnv(obs_dim=6)
