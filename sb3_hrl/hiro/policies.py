@@ -6,7 +6,7 @@ HIRO algorithm implementation.
 
 from __future__ import annotations
 
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import numpy as np
 from gymnasium import spaces
@@ -30,17 +30,19 @@ class SubgoalProjectionWrapper:
 
     def __init__(
         self,
-        projection_fn: Optional[
-            Callable[[Union[np.ndarray, dict[str, np.ndarray]]], np.ndarray]
-        ] = None,
-        observation_space: Optional[spaces.Space] = None,
+        projection_fn: Callable[[np.ndarray | dict[str, np.ndarray]], np.ndarray]
+        | None = None,
+        observation_space: spaces.Space | None = None,
     ) -> None:
         self._projection_fn = projection_fn
         self._observation_space = observation_space
 
-    def __call__(
-        self, observation: Union[np.ndarray, dict[str, np.ndarray]]
-    ) -> np.ndarray:
+    @property
+    def is_identity(self) -> bool:
+        """Whether this projection is the identity (no custom function)."""
+        return self._projection_fn is None
+
+    def __call__(self, observation: np.ndarray | dict[str, np.ndarray]) -> np.ndarray:
         """Project an observation into subgoal space.
 
         Parameters
@@ -71,15 +73,18 @@ class SubgoalProjectionWrapper:
 
 def flatten_observation(
     observation_space: spaces.Space,
-    observation: Union[np.ndarray, dict[str, np.ndarray]],
+    observation: np.ndarray | dict[str, np.ndarray],
 ) -> np.ndarray:
     """Flatten an observation according to a Gymnasium space.
+
+    Uses a fast-path for Box spaces that avoids the overhead of
+    ``gymnasium.spaces.utils.flatten`` dispatch.
 
     Parameters
     ----------
     observation_space : spaces.Space
             Original environment observation space.
-        observation : np.ndarray | dict[str, np.ndarray]
+    observation : np.ndarray | dict[str, np.ndarray]
             Observation to flatten.
 
     Returns
@@ -87,6 +92,8 @@ def flatten_observation(
     np.ndarray
             Flattened observation vector.
     """
+    if isinstance(observation_space, spaces.Box):
+        return np.asarray(observation, dtype=np.float32).ravel()
     flat = space_utils.flatten(observation_space, observation)
     return np.asarray(flat, dtype=np.float32)
 
